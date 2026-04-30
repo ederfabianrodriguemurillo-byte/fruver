@@ -210,6 +210,10 @@ export function FruverScheduler() {
         }
       }
       setHydrated(true);
+
+      if (getSupabaseBrowserClient()) {
+        loadSupabaseData(true);
+      }
     }, 0);
 
     return () => window.clearTimeout(timeout);
@@ -221,6 +225,13 @@ export function FruverScheduler() {
     }
 
     window.localStorage.setItem(storageKey, JSON.stringify(state));
+
+    if (supabaseClient) {
+      const saveTimeout = window.setTimeout(() => {
+        saveSupabaseData(true);
+      }, 2500);
+      return () => window.clearTimeout(saveTimeout);
+    }
   }, [hydrated, state]);
 
   useEffect(() => {
@@ -616,7 +627,7 @@ export function FruverScheduler() {
     showNotice("success", "Datos iniciales restaurados");
   }
 
-  async function loadSupabaseData() {
+  async function loadSupabaseData(silent = false) {
     if (!supabaseClient) {
       showNotice("warning", "Configura Supabase en .env.local");
       return;
@@ -697,10 +708,12 @@ export function FruverScheduler() {
       schedules,
       paymentSettings: settings ? dbSettingsToApp(settings) : paymentDefaults,
     });
-    showNotice("success", "Datos importados desde Supabase");
+    if (!silent) {
+      showNotice("success", "Datos importados desde Supabase");
+    }
   }
 
-  async function saveSupabaseData() {
+  async function saveSupabaseData(silent = false) {
     if (!supabaseClient) {
       showNotice("warning", "Configura Supabase en .env.local");
       return;
@@ -745,7 +758,9 @@ export function FruverScheduler() {
       return;
     }
 
-    showNotice("success", "Datos guardados en Supabase");
+    if (!silent) {
+      showNotice("success", "Datos guardados en Supabase");
+    }
   }
 
   return (
