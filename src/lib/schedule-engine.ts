@@ -1,13 +1,16 @@
 import { areas, cashRegisters } from "./seed-data";
 import type {
   Area,
+  AssignmentMetrics,
+  DailyReportRow,
   DailySchedule,
   DayKey,
   DayKind,
   DayProfile,
-  DailyReportRow,
   Employee,
   EmployeeReportRow,
+  EmployeeUnavailability,
+  ExtraPosition,
   Holiday,
   PaymentSettings,
   ScheduleAssignment,
@@ -27,10 +30,10 @@ const dayKeys: DayKey[] = [
 const dayLabels: Record<DayKey, string> = {
   lunes: "lunes",
   martes: "martes",
-  miercoles: "miércoles",
+  miercoles: "miercoles",
   jueves: "jueves",
   viernes: "viernes",
-  sabado: "sábado",
+  sabado: "sabado",
   domingo: "domingo",
 };
 
@@ -50,15 +53,7 @@ const monthLabels = [
 ];
 
 export function makeId() {
-  if (globalThis.crypto?.randomUUID) {
-    return globalThis.crypto.randomUUID();
-  }
-
-  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (char) => {
-    const random = Math.floor(Math.random() * 16);
-    const value = char === "x" ? random : (random & 0x3) | 0x8;
-    return value.toString(16);
-  });
+  return globalThis.crypto?.randomUUID?.() ?? Math.random().toString(36).slice(2);
 }
 
 export function parseDateKey(dateKey: string) {
@@ -67,10 +62,9 @@ export function parseDateKey(dateKey: string) {
 }
 
 export function formatDateKey(date: Date) {
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(
+    date.getDate(),
+  ).padStart(2, "0")}`;
 }
 
 export function addDays(date: Date, days: number) {
@@ -97,8 +91,7 @@ export function formatLongDate(dateKey: string) {
 export function startOfWeek(date: Date) {
   const copy = new Date(date);
   const day = copy.getDay();
-  const diff = day === 0 ? -6 : 1 - day;
-  copy.setDate(copy.getDate() + diff);
+  copy.setDate(copy.getDate() + (day === 0 ? -6 : 1 - day));
   copy.setHours(0, 0, 0, 0);
   return copy;
 }
@@ -108,34 +101,26 @@ export function getWeekDates(weekStartKey: string) {
   return Array.from({ length: 7 }, (_, index) => formatDateKey(addDays(start, index)));
 }
 
-export function getTomorrowKey() {
-  return formatDateKey(addDays(new Date(), 1));
-}
-
 export function getTodayKey() {
   return formatDateKey(new Date());
+}
+
+export function getTomorrowKey() {
+  return formatDateKey(addDays(new Date(), 1));
 }
 
 export function toWeekStartKey(dateKey: string) {
   return formatDateKey(startOfWeek(parseDateKey(dateKey)));
 }
 
-export function calculateShiftHours(
-  start1: string,
-  end1: string,
-  start2?: string,
-  end2?: string,
-) {
-  const first = minutesBetween(start1, end1);
-  const second = start2 && end2 ? minutesBetween(start2, end2) : 0;
-  return roundHours((first + second) / 60);
-}
-
 export function formatTimeAmPm(time: string) {
   const [hours, minutes] = time.split(":").map(Number);
   const period = hours >= 12 ? "pm" : "am";
   const displayHours = hours % 12 || 12;
-  return `${displayHours}${minutes > 0 ? `:${minutes.toString().padStart(2, "0")}` : ""}${period}`;
+  if (hours === 12 && minutes === 0) {
+    return "12m";
+  }
+  return `${displayHours}${minutes ? `:${String(minutes).padStart(2, "0")}` : ""}${period}`;
 }
 
 export function formatScheduleText(
@@ -145,82 +130,147 @@ export function formatScheduleText(
   end2?: string,
 ) {
   const first = `${formatTimeAmPm(start1)}-${formatTimeAmPm(end1)}`;
-  if (start2 && end2) {
-    return `${first} y ${formatTimeAmPm(start2)}-${formatTimeAmPm(end2)}`;
-  }
-  return first;
+  return start2 && end2
+    ? `${first} y ${formatTimeAmPm(start2)}-${formatTimeAmPm(end2)}`
+    : first;
 }
 
-export function calculateRestWarning(
+export function calculateShiftHours(
   start1: string,
   end1: string,
   start2?: string,
   end2?: string,
-): string | null {
-  if (!start2 || !end2) {
-    return null;
-  }
-  const restMinutes = minutesBetween(end1, start2);
-  if (restMinutes < 120) {
-    return `Descanso es menor a 2 horas (${Math.round(restMinutes)} min)`;
-  }
-  return null;
+) {
+  return roundHours((minutesBetween(start1, end1) + (start2 && end2 ? minutesBetween(start2, end2) : 0)) / 60);
 }
 
-export function applyExtraHours(
-  template: ShiftTemplate,
-  assignment: ScheduleAssignment,
-  amount: number,
-  position: "final" | "antes-descanso" | "personalizado",
-  customTimes?: { start1: string; end1: string; start2?: string; end2?: string }
+export function getBreakMinutes(
+  _start1: string,
+  end1: string,
+  start2?: string,
+  end2?: string,
 ) {
-  let { start1, end1, start2, end2 } = template;
-  
-  // Use existing custom times if modifying an already modified shift
-  if (assignment.customStart1) start1 = assignment.customStart1;
-  if (assignment.customEnd1) end1 = assignment.customEnd1;
-  if (assignment.customStart2) start2 = assignment.customStart2;
-  if (assignment.customEnd2) end2 = assignment.customEnd2;
-
-  if (position === "personalizado" && customTimes) {
-    start1 = customTimes.start1;
-    end1 = customTimes.end1;
-    start2 = customTimes.start2;
-    end2 = customTimes.end2;
-  } else if (position === "final") {
-    if (start2 && end2) {
-      end2 = addHoursToTime(end2, amount);
-    } else {
-      end1 = addHoursToTime(end1, amount);
-    }
-  } else if (position === "antes-descanso") {
-    if (start2 && end2) {
-      end1 = addHoursToTime(end1, amount);
-    } else {
-      end1 = addHoursToTime(end1, amount);
-    }
+  void end2;
+  if (!start2) {
+    return undefined;
   }
+  return minutesBetween(end1, start2);
+}
 
-  const newTotalHours = calculateShiftHours(start1, end1, start2, end2);
-  const customScheduleText = formatScheduleText(start1, end1, start2, end2);
-  const restWarning = calculateRestWarning(start1, end1, start2, end2);
-
+export function getAssignmentTimes(
+  assignment: ScheduleAssignment,
+  template?: ShiftTemplate,
+) {
   return {
-    customStart1: start1,
-    customEnd1: end1,
-    customStart2: start2,
-    customEnd2: end2,
-    customTotalHours: newTotalHours,
-    customScheduleText,
-    restWarning,
+    start1: assignment.customStart1 ?? template?.start1 ?? "06:00",
+    end1: assignment.customEnd1 ?? template?.end1 ?? "12:00",
+    start2: assignment.customStart2 ?? template?.start2,
+    end2: assignment.customEnd2 ?? template?.end2,
   };
 }
 
-function addHoursToTime(time: string, hours: number) {
-  const totalMinutes = parseTime(time) + Math.round(hours * 60);
-  const newHours = Math.floor(totalMinutes / 60) % 24;
-  const newMinutes = totalMinutes % 60;
-  return `${newHours.toString().padStart(2, "0")}:${newMinutes.toString().padStart(2, "0")}`;
+export function buildAssignmentMetrics({
+  assignment,
+  template,
+  paymentSettings,
+}: {
+  assignment: ScheduleAssignment;
+  template?: ShiftTemplate;
+  paymentSettings: PaymentSettings;
+}): AssignmentMetrics {
+  const times = getAssignmentTimes(assignment, template);
+  const totalHours = calculateShiftHours(
+    times.start1,
+    times.end1,
+    times.start2,
+    times.end2,
+  );
+  const breakMinutes = getBreakMinutes(
+    times.start1,
+    times.end1,
+    times.start2,
+    times.end2,
+  );
+  const warningMessage =
+    breakMinutes !== undefined && breakMinutes < 120
+      ? `Advertencia: este cambio deja solo ${roundHours(breakMinutes / 60)} hora(s) de descanso. Lo recomendado es minimo 2 horas.`
+      : undefined;
+  const overtimeHours = Math.max(0, totalHours - paymentSettings.dailyNormalHours);
+
+  return {
+    scheduleText: formatScheduleText(times.start1, times.end1, times.start2, times.end2),
+    totalHours,
+    normalHours: roundHours(totalHours - overtimeHours),
+    overtimeHours: roundHours(overtimeHours),
+    breakMinutes,
+    warningMessage,
+  };
+}
+
+export function hydrateAssignmentMetrics(
+  assignment: ScheduleAssignment,
+  template: ShiftTemplate | undefined,
+  paymentSettings: PaymentSettings,
+): ScheduleAssignment {
+  const metrics = buildAssignmentMetrics({ assignment, template, paymentSettings });
+  return {
+    ...assignment,
+    customTotalHours: metrics.totalHours,
+    customScheduleText: metrics.scheduleText,
+    normalHours: metrics.normalHours,
+    overtimeHours: metrics.overtimeHours,
+    breakMinutes: metrics.breakMinutes,
+    warningMessage: metrics.warningMessage,
+  };
+}
+
+export function applyExtraHours({
+  assignment,
+  template,
+  amount,
+  position,
+  paymentSettings,
+  customTimes,
+  reason,
+}: {
+  assignment: ScheduleAssignment;
+  template: ShiftTemplate;
+  amount: number;
+  position: ExtraPosition;
+  paymentSettings: PaymentSettings;
+  customTimes?: { start1: string; end1: string; start2?: string; end2?: string };
+  reason?: string;
+}) {
+  let times: { start1: string; end1: string; start2?: string; end2?: string } =
+    getAssignmentTimes(assignment, template);
+
+  if (position === "personalizado" && customTimes) {
+    times = customTimes;
+  } else if (position === "final") {
+    if (times.start2 && times.end2) {
+      times.end2 = addHoursToTime(times.end2, amount);
+    } else {
+      times.end1 = addHoursToTime(times.end1, amount);
+    }
+  } else if (position === "antes-descanso") {
+    times.end1 = addHoursToTime(times.end1, amount);
+  }
+
+  return hydrateAssignmentMetrics(
+    {
+      ...assignment,
+      customStart1: times.start1,
+      customEnd1: times.end1,
+      customStart2: times.start2,
+      customEnd2: times.end2,
+      overtimeManual: true,
+      overtimeReason: reason,
+      note: reason || assignment.note,
+      manual: true,
+    },
+    template,
+    paymentSettings,
+  );
 }
 
 export function getDayProfile(dateKey: string, holidays: Holiday[]): DayProfile {
@@ -231,27 +281,23 @@ export function getDayProfile(dateKey: string, holidays: Holiday[]): DayProfile 
   if (holidayName) {
     return { kind: "festivo", isStrongSalesDay, holidayName };
   }
-
   if (date.getDay() === 0) {
     return { kind: "domingo", isStrongSalesDay };
   }
-
   if (date.getDay() === 6) {
     return { kind: "sabado", isStrongSalesDay };
   }
-
   return { kind: isStrongSalesDay ? "fuerte" : "normal", isStrongSalesDay };
 }
 
 export function getDayKindLabel(profile: DayProfile) {
   const labels: Record<DayKind, string> = {
-    normal: "Día normal",
-    sabado: "Sábado",
+    normal: "Dia normal",
+    sabado: "Sabado",
     domingo: "Domingo",
     festivo: "Festivo",
-    fuerte: "Día fuerte",
+    fuerte: "Dia fuerte",
   };
-
   return profile.holidayName ? `${labels[profile.kind]}: ${profile.holidayName}` : labels[profile.kind];
 }
 
@@ -261,63 +307,76 @@ export function generateScheduleForDate({
   shiftTemplates,
   holidays,
   paymentSettings,
+  schedules,
+  unavailability,
 }: {
   dateKey: string;
   employees: Employee[];
   shiftTemplates: ShiftTemplate[];
   holidays: Holiday[];
   paymentSettings: PaymentSettings;
+  schedules?: DailySchedule[];
+  unavailability?: EmployeeUnavailability[];
 }): DailySchedule {
-  const date = parseDateKey(dateKey);
-  const dayKey = getDayKey(date);
   const profile = getDayProfile(dateKey, holidays);
+  const dayKey = getDayKey(parseDateKey(dateKey));
   const scheduleId = makeId();
-  const usedEmployeeIds = new Set<string>();
-  const assignments: ScheduleAssignment[] = [];
   const desiredCashRegisters = getDesiredCashRegisterCount(profile, paymentSettings);
+  const assignments: ScheduleAssignment[] = [];
+  const usedEmployees = new Set<string>();
 
   areas.forEach((area) => {
-    let candidates = employees
-      .filter((employee) => employee.active)
-      .filter((employee) => employee.dayOff !== dayKey)
-      .filter((employee) => canWorkArea(employee, area))
-      .filter((employee) => !usedEmployeeIds.has(employee.id));
+    const desiredCount = area === "Caja" ? desiredCashRegisters : area === "Pedidos" ? 2 : 1;
+    const templates = shiftTemplates
+      .filter((template) => templateMatches(template, area, profile))
+      .sort((a, b) => templateWeight(a, profile) - templateWeight(b, profile));
 
-    if (area === "Caja") {
-      candidates = rotateEmployees(candidates, dateKey).slice(0, desiredCashRegisters);
-    } else {
-      candidates = candidates
-        .filter((employee) => employee.primaryArea === area)
-        .sort((a, b) => a.name.localeCompare(b.name));
+    if (!templates.length) {
+      return;
     }
 
-    candidates.forEach((employee, index) => {
-      const template = chooseTemplateForEmployee(
-        employee,
-        area,
-        profile,
-        shiftTemplates,
-        dateKey,
-        index,
-      );
+    for (let slot = 0; slot < desiredCount; slot += 1) {
+      const template = templates[slot % templates.length];
+      const employee = employees
+        .filter((item) => item.active)
+        .filter((item) => !usedEmployees.has(item.id))
+        .filter((item) => canWorkArea(item, area))
+        .map((item) => ({
+          employee: item,
+          score: scoreEmployeeForShift(item, template, dateKey, {
+            schedules: schedules ?? [],
+            unavailability: unavailability ?? [],
+            paymentSettings,
+            dayKey,
+            area,
+          }),
+        }))
+        .filter((item) => item.score < 9000)
+        .sort((a, b) => a.score - b.score || a.employee.name.localeCompare(b.employee.name))[0]
+        ?.employee;
 
-      if (!template) {
-        return;
+      if (!employee) {
+        continue;
       }
 
-      usedEmployeeIds.add(employee.id);
-      assignments.push({
-        id: makeId(),
-        scheduleId,
-        date: dateKey,
-        employeeId: employee.id,
-        area,
-        shiftTemplateId: template.id,
-        cashRegister: area === "Caja" ? cashRegisters[index] : undefined,
-        note: employee.note,
-        manual: false,
-      });
-    });
+      usedEmployees.add(employee.id);
+      const assignment = hydrateAssignmentMetrics(
+        {
+          id: makeId(),
+          scheduleId,
+          date: dateKey,
+          employeeId: employee.id,
+          area,
+          shiftTemplateId: template.id,
+          cashRegister: area === "Caja" ? cashRegisters[slot] : undefined,
+          note: employee.note,
+          manual: false,
+        },
+        template,
+        paymentSettings,
+      );
+      assignments.push(assignment);
+    }
   });
 
   return {
@@ -331,10 +390,108 @@ export function generateScheduleForDate({
   };
 }
 
-export function replaceSchedules(
-  current: DailySchedule[],
-  generated: DailySchedule[],
+export function generateSmartSchedule({
+  dateKeys,
+  employees,
+  shiftTemplates,
+  holidays,
+  paymentSettings,
+  schedules = [],
+  unavailability = [],
+}: {
+  dateKeys: string[];
+  employees: Employee[];
+  shiftTemplates: ShiftTemplate[];
+  holidays: Holiday[];
+  paymentSettings: PaymentSettings;
+  schedules?: DailySchedule[];
+  unavailability?: EmployeeUnavailability[];
+}) {
+  let history = schedules;
+
+  return dateKeys.map((dateKey) => {
+    const proposal = generateScheduleForDate({
+      dateKey,
+      employees,
+      shiftTemplates,
+      holidays,
+      paymentSettings,
+      schedules: history,
+      unavailability,
+    });
+    history = replaceSchedules(history, [proposal]);
+    return proposal;
+  });
+}
+
+export function scoreEmployeeForShift(
+  employee: Employee,
+  shift: ShiftTemplate,
+  dateKey: string,
+  context: {
+    schedules: DailySchedule[];
+    unavailability: EmployeeUnavailability[];
+    paymentSettings: PaymentSettings;
+    dayKey: DayKey;
+    area: Area;
+  },
 ) {
+  if (!employee.active) return 10000;
+  if (employee.dayOff === context.dayKey) return 9500;
+  if (hasAllDayUnavailability(employee.id, dateKey, context.unavailability)) return 9000;
+
+  const recentAssignments = context.schedules
+    .filter((schedule) => schedule.date < dateKey)
+    .flatMap((schedule) =>
+      schedule.assignments
+        .filter((assignment) => assignment.employeeId === employee.id)
+        .map((assignment) => ({ schedule, assignment })),
+    )
+    .slice(-12);
+
+  const shiftKind = getShiftKind(shift);
+  let score = employee.primaryArea === context.area ? 0 : 12;
+
+  if (employee.type === "Apoyo") score += 8;
+  if (employee.type === "Fijo" && employee.primaryArea === context.area) score -= 4;
+  if (employee.preferredShiftTemplateId === shift.id || employee.baseShiftTemplateId === shift.id) score -= 3;
+
+  recentAssignments.slice(-3).forEach(({ assignment }) => {
+    if (assignment.shiftTemplateId === shift.id) score += 9;
+  });
+
+  recentAssignments.slice(-5).forEach(({ assignment }) => {
+    if (getAssignmentShiftKind(assignment) === shiftKind) score += 4;
+  });
+
+  const weekStart = toWeekStartKey(dateKey);
+  const weeklyHours = context.schedules
+    .filter((schedule) => schedule.weekStart === weekStart)
+    .flatMap((schedule) => schedule.assignments)
+    .filter((assignment) => assignment.employeeId === employee.id)
+    .reduce((sum, assignment) => sum + (assignment.customTotalHours ?? 0), 0);
+
+  if (weeklyHours + shift.totalHours > context.paymentSettings.weeklyNormalHours) {
+    score += 12;
+  }
+
+  const profile = getDayProfile(dateKey, []);
+  if (profile.kind === "domingo" || profile.kind === "festivo") {
+    const lastHoliday = recentAssignments
+      .filter(({ schedule }) => schedule.dayKind === "domingo" || schedule.dayKind === "festivo")
+      .at(-1);
+    if (lastHoliday && getAssignmentShiftKind(lastHoliday.assignment) === shiftKind) {
+      score += 20;
+    }
+  }
+
+  if (shift.totalHours > 10) score += 8;
+  if (shiftKind === "cierre") score += recentAssignments.filter(({ assignment }) => getAssignmentShiftKind(assignment) === "cierre").length * 3;
+
+  return score;
+}
+
+export function replaceSchedules(current: DailySchedule[], generated: DailySchedule[]) {
   const generatedDates = new Set(generated.map((schedule) => schedule.date));
   return [
     ...current.filter((schedule) => !generatedDates.has(schedule.date)),
@@ -358,10 +515,7 @@ export function duplicateWeek({
 
   return sourceDates.flatMap((sourceDate, index) => {
     const source = schedules.find((schedule) => schedule.date === sourceDate);
-    if (!source) {
-      return [];
-    }
-
+    if (!source) return [];
     const targetDate = targetDates[index];
     const profile = getDayProfile(targetDate, holidays);
     const scheduleId = makeId();
@@ -391,7 +545,6 @@ export function calculateWeeklyReport({
   weekStart,
   schedules,
   employees,
-  shiftTemplates,
   paymentSettings,
 }: {
   weekStart: string;
@@ -401,60 +554,31 @@ export function calculateWeeklyReport({
   paymentSettings: PaymentSettings;
 }): EmployeeReportRow[] {
   const weekDates = new Set(getWeekDates(weekStart));
-  const totals = new Map<
-    string,
-    { daily: Map<string, number>; total: number; employee: Employee }
-  >();
+  const totals = new Map<string, { employee: Employee; normal: number; overtime: number }>();
 
   schedules
     .filter((schedule) => weekDates.has(schedule.date))
-    .forEach((schedule) => {
-      schedule.assignments.forEach((assignment) => {
-        const employee = employees.find((item) => item.id === assignment.employeeId);
-        const template = shiftTemplates.find((item) => item.id === assignment.shiftTemplateId);
-
-        if (!employee || !template) {
-          return;
-        }
-
-        const hours = assignment.customTotalHours ?? template.totalHours;
-        const current = totals.get(employee.id) ?? {
-          daily: new Map<string, number>(),
-          total: 0,
-          employee,
-        };
-
-        current.total += hours;
-        current.daily.set(
-          schedule.date,
-          (current.daily.get(schedule.date) ?? 0) + hours,
-        );
-        totals.set(employee.id, current);
-      });
+    .flatMap((schedule) => schedule.assignments)
+    .forEach((assignment) => {
+      const employee = employees.find((item) => item.id === assignment.employeeId);
+      if (!employee) return;
+      const current = totals.get(employee.id) ?? { employee, normal: 0, overtime: 0 };
+      current.normal += assignment.normalHours ?? Math.min(paymentSettings.dailyNormalHours, assignment.customTotalHours ?? 0);
+      current.overtime += assignment.overtimeHours ?? Math.max(0, (assignment.customTotalHours ?? 0) - paymentSettings.dailyNormalHours);
+      totals.set(employee.id, current);
     });
 
   return Array.from(totals.values())
-    .map(({ employee, daily, total }) => {
-      const dailyOvertime = Array.from(daily.values()).reduce(
-        (sum, hours) => sum + Math.max(0, hours - paymentSettings.dailyNormalHours),
-        0,
-      );
-      const weeklyOvertime = Math.max(0, total - paymentSettings.weeklyNormalHours);
-      const overtimeHours = roundHours(Math.max(dailyOvertime, weeklyOvertime));
-      const normalHours = roundHours(Math.max(0, total - overtimeHours));
-      const overtimeHourlyRate = employee.overtimeHourlyRate ?? 0;
-
-      return {
-        employeeId: employee.id,
-        employee: employee.name,
-        area: employee.primaryArea,
-        normalHours,
-        overtimeHours,
-        overtimeHourlyRate,
-        overtimePay: Math.round(overtimeHours * overtimeHourlyRate),
-        warning: overtimeHours > paymentSettings.overtimeAlertHours,
-      };
-    })
+    .map(({ employee, normal, overtime }) => ({
+      employeeId: employee.id,
+      employee: employee.name,
+      area: employee.primaryArea,
+      normalHours: roundHours(normal),
+      overtimeHours: roundHours(overtime),
+      overtimeHourlyRate: employee.overtimeHourlyRate ?? 0,
+      overtimePay: Math.round(overtime * (employee.overtimeHourlyRate ?? 0)),
+      warning: overtime > paymentSettings.overtimeAlertHours,
+    }))
     .sort((a, b) => b.overtimeHours - a.overtimeHours || a.employee.localeCompare(b.employee));
 }
 
@@ -463,11 +587,13 @@ export function calculateDailyReport({
   schedules,
   employees,
   shiftTemplates,
+  unavailability = [],
 }: {
   weekStart: string;
   schedules: DailySchedule[];
   employees: Employee[];
   shiftTemplates: ShiftTemplate[];
+  unavailability?: EmployeeUnavailability[];
 }): DailyReportRow[] {
   const weekDates = new Set(getWeekDates(weekStart));
   const rows: DailyReportRow[] = [];
@@ -478,28 +604,7 @@ export function calculateDailyReport({
       schedule.assignments.forEach((assignment) => {
         const employee = employees.find((item) => item.id === assignment.employeeId);
         const template = shiftTemplates.find((item) => item.id === assignment.shiftTemplateId);
-
-        if (!employee || !template) {
-          return;
-        }
-
-        const finalHours = assignment.customTotalHours ?? template.totalHours;
-        const manualOvertime = finalHours - template.totalHours;
-        // Approximation: if finalHours > 8 it's overtime, but we just report total final vs original
-        const normalHours = Math.min(8, finalHours);
-        const totalOvertime = Math.max(0, finalHours - 8);
-        const automaticOvertime = Math.max(0, totalOvertime - Math.max(0, manualOvertime));
-
-        let warningStr = "";
-        if (assignment.customTotalHours) {
-          const warn = calculateRestWarning(
-            assignment.customStart1 ?? template.start1,
-            assignment.customEnd1 ?? template.end1,
-            assignment.customStart2 ?? template.start2,
-            assignment.customEnd2 ?? template.end2
-          );
-          if (warn) warningStr = warn;
-        }
+        if (!employee || !template) return;
 
         rows.push({
           employeeId: employee.id,
@@ -507,16 +612,42 @@ export function calculateDailyReport({
           area: assignment.area,
           day: getDayLabel(getDayKey(parseDateKey(schedule.date))),
           date: schedule.date,
+          dayKind: schedule.dayKind,
           originalSchedule: template.scheduleText,
           finalSchedule: assignment.customScheduleText ?? template.scheduleText,
-          normalHours: roundHours(normalHours),
-          automaticOvertime: roundHours(automaticOvertime),
-          manualOvertime: roundHours(Math.max(0, manualOvertime)),
-          totalOvertime: roundHours(totalOvertime),
-          note: assignment.note ?? "",
-          restWarning: warningStr,
+          normalHours: assignment.normalHours ?? 0,
+          automaticOvertime: assignment.overtimeManual ? 0 : assignment.overtimeHours ?? 0,
+          manualOvertime: assignment.overtimeManual ? assignment.overtimeHours ?? 0 : 0,
+          totalOvertime: assignment.overtimeHours ?? 0,
+          absence: "",
+          note: assignment.overtimeReason ?? assignment.note ?? "",
+          restWarning: assignment.warningMessage ?? "",
         });
       });
+
+      unavailability
+        .filter((item) => weekDates.has(item.date) && item.date === schedule.date)
+        .forEach((item) => {
+          const employee = employees.find((candidate) => candidate.id === item.employeeId);
+          if (!employee) return;
+          rows.push({
+            employeeId: employee.id,
+            employeeName: employee.name,
+            area: employee.primaryArea,
+            day: getDayLabel(getDayKey(parseDateKey(item.date))),
+            date: item.date,
+            dayKind: schedule.dayKind,
+            originalSchedule: "",
+            finalSchedule: "",
+            normalHours: 0,
+            automaticOvertime: 0,
+            manualOvertime: 0,
+            totalOvertime: 0,
+            absence: item.type,
+            note: item.reason ?? "",
+            restWarning: "",
+          });
+        });
     });
 
   return rows.sort((a, b) => a.date.localeCompare(b.date) || a.employeeName.localeCompare(b.employeeName));
@@ -527,55 +658,63 @@ export function generateWhatsAppMessage({
   schedule,
   employees,
   shiftTemplates,
+  unavailability = [],
+  includeUnavailability = true,
 }: {
   dateKey: string;
   schedule?: DailySchedule;
   employees: Employee[];
   shiftTemplates: ShiftTemplate[];
+  unavailability?: EmployeeUnavailability[];
+  includeUnavailability?: boolean;
 }) {
-  const tomorrowKey = getTomorrowKey();
-  const lines: string[] = [
+  const lines = [
     "Buenas tardes.",
-    `Turnos para ${dateKey === tomorrowKey ? "mañana " : ""}${formatLongDate(dateKey)}:`,
+    `Turnos para ${dateKey === getTomorrowKey() ? "manana " : ""}${formatLongDate(dateKey)}:`,
     "",
   ];
 
   areas.forEach((area) => {
-    const areaAssignments =
-      schedule?.assignments.filter((assignment) => assignment.area === area) ?? [];
-
-    if (areaAssignments.length === 0) {
-      return;
-    }
+    const areaAssignments = schedule?.assignments.filter((assignment) => assignment.area === area) ?? [];
+    if (!areaAssignments.length) return;
 
     lines.push(`- ${area}`, "");
-    const grouped = groupAssignmentsByTemplate(areaAssignments, shiftTemplates);
+    const groups = new Map<string, ScheduleAssignment[]>();
+    areaAssignments.forEach((assignment) => {
+      const template = shiftTemplates.find((item) => item.id === assignment.shiftTemplateId);
+      const key = assignment.customScheduleText ?? template?.scheduleText ?? "Sin horario";
+      groups.set(key, [...(groups.get(key) ?? []), assignment]);
+    });
 
-    grouped.forEach(([scheduleText, assignments]) => {
-      lines.push(scheduleText);
+    groups.forEach((assignments, text) => {
+      lines.push(text);
       assignments.forEach((assignment) => {
         const employee = employees.find((item) => item.id === assignment.employeeId);
-        if (!employee) {
-          return;
-        }
-
-        const cashRegisterNote =
-          assignment.area === "Caja" && assignment.cashRegister
-            ? ` (${assignment.cashRegister})`
-            : "";
-        lines.push(`${employee.name}${cashRegisterNote}`);
+        if (!employee) return;
+        lines.push(`${employee.name}${assignment.cashRegister ? ` (${assignment.cashRegister})` : ""}`);
       });
       lines.push("");
     });
   });
 
   const restDay = getDayKey(parseDateKey(dateKey));
-  const restingEmployees = employees
+  const resting = employees
     .filter((employee) => employee.active && employee.dayOff === restDay)
     .sort((a, b) => a.name.localeCompare(b.name));
+  if (resting.length) {
+    lines.push("- Descanso");
+    resting.forEach((employee) => lines.push(employee.name));
+    lines.push("");
+  }
 
-  lines.push("- Descanso");
-  restingEmployees.forEach((employee) => lines.push(employee.name));
+  const unavailable = unavailability.filter((item) => item.date === dateKey && item.allDay);
+  if (includeUnavailability && unavailable.length) {
+    lines.push("- Permiso");
+    unavailable.forEach((item) => {
+      const employee = employees.find((candidate) => candidate.id === item.employeeId);
+      if (employee) lines.push(employee.name);
+    });
+  }
 
   return lines.join("\n").trimEnd();
 }
@@ -612,208 +751,94 @@ export function formatCurrency(value: number) {
 
 export function formatHours(value: number) {
   return new Intl.NumberFormat("es-CO", {
-    minimumFractionDigits: value % 1 === 0 ? 0 : 1,
     maximumFractionDigits: 1,
   }).format(value);
 }
 
-function minutesBetween(start: string, end: string) {
-  const startMinutes = parseTime(start);
-  let endMinutes = parseTime(end);
-
-  if (endMinutes < startMinutes) {
-    endMinutes += 24 * 60;
-  }
-
-  return endMinutes - startMinutes;
+export function validateTimeRange(start: string, end: string) {
+  return parseTime(end) > parseTime(start);
 }
 
-function parseTime(value: string) {
-  const [hours, minutes] = value.split(":").map(Number);
-  return hours * 60 + minutes;
-}
-
-function roundHours(value: number) {
-  return Math.round(value * 10) / 10;
-}
-
-function getDesiredCashRegisterCount(
-  profile: DayProfile,
-  settings: PaymentSettings,
-) {
-  if (profile.isStrongSalesDay) {
-    return settings.strongDayCashRegisters;
-  }
-
-  if (profile.kind === "sabado" || profile.kind === "domingo" || profile.kind === "festivo") {
-    return settings.weekendCashRegisters;
-  }
-
+function getDesiredCashRegisterCount(profile: DayProfile, settings: PaymentSettings) {
+  if (profile.isStrongSalesDay) return settings.strongDayCashRegisters;
+  if (profile.kind === "sabado" || profile.kind === "domingo" || profile.kind === "festivo") return settings.weekendCashRegisters;
   return settings.defaultCashRegisters;
+}
+
+function templateMatches(template: ShiftTemplate, area: Area, profile: DayProfile) {
+  if (!template.active || !template.allowedAreas.includes(area)) return false;
+  if (template.appliesTo.includes(profile.kind)) return true;
+  if (profile.kind === "festivo" && template.appliesTo.includes("domingo")) return true;
+  if (profile.kind === "fuerte" && template.appliesTo.includes("normal")) return true;
+  return false;
+}
+
+function templateWeight(template: ShiftTemplate, profile: DayProfile) {
+  if ((profile.kind === "domingo" || profile.kind === "festivo") && !template.start2) return 0;
+  if (profile.kind === "sabado" && !template.start2) return 1;
+  return template.totalHours;
 }
 
 function canWorkArea(employee: Employee, area: Area) {
   return employee.primaryArea === area || employee.secondaryAreas.includes(area);
 }
 
-function chooseTemplateForEmployee(
-  employee: Employee,
-  area: Area,
-  profile: DayProfile,
-  templates: ShiftTemplate[],
-  dateKey: string,
-  index: number,
-) {
-  const candidates = templates
-    .filter((template) => templateMatches(template, area, profile))
-    .sort((a, b) => templateScore(b, profile, area) - templateScore(a, profile, area));
-
-  const baseTemplate = templates.find((template) => template.id === employee.baseShiftTemplateId);
-
-  if (
-    employee.type === "Fijo" &&
-    baseTemplate &&
-    templateMatches(baseTemplate, area, profile)
-  ) {
-    return baseTemplate;
-  }
-
-  if (candidates.length === 0) {
-    return baseTemplate?.active && baseTemplate.allowedAreas.includes(area)
-      ? baseTemplate
-      : undefined;
-  }
-
-  if (employee.type === "Rotativo" || area === "Caja") {
-    const rotationSeed = getRotationSeed(dateKey) + index + employee.name.length;
-    return candidates[rotationSeed % candidates.length];
-  }
-
-  return candidates[0];
+function hasAllDayUnavailability(employeeId: string, dateKey: string, unavailability: EmployeeUnavailability[]) {
+  return unavailability.some((item) => item.employeeId === employeeId && item.date === dateKey && item.allDay);
 }
 
-function templateMatches(template: ShiftTemplate, area: Area, profile: DayProfile) {
-  if (!template.active || !template.allowedAreas.includes(area)) {
-    return false;
-  }
-
-  if (template.appliesTo.includes(profile.kind)) {
-    return true;
-  }
-
-  if (profile.kind === "festivo" && template.appliesTo.includes("domingo")) {
-    return true;
-  }
-
-  if (profile.kind === "fuerte" && template.appliesTo.includes("normal")) {
-    return true;
-  }
-
-  return false;
+function getShiftKind(shift: ShiftTemplate) {
+  const start = parseTime(shift.start1);
+  const end = parseTime(shift.end2 ?? shift.end1);
+  if (end >= 20 * 60) return "cierre";
+  if (start < 8 * 60) return "manana";
+  if (start >= 12 * 60) return "tarde";
+  return shift.start2 ? "partido" : "manana";
 }
 
-function templateScore(template: ShiftTemplate, profile: DayProfile, area: Area) {
-  let score = 0;
-
-  if (template.appliesTo.includes(profile.kind)) {
-    score += 5;
-  }
-
-  if (profile.isStrongSalesDay && template.appliesTo.includes("fuerte")) {
-    score += area === "Caja" ? 8 : 3;
-  }
-
-  if (
-    ["sabado", "domingo", "festivo"].includes(profile.kind) &&
-    template.start2 === undefined
-  ) {
-    score += 4;
-  }
-
-  if (template.totalHours <= 10) {
-    score += 2;
-  }
-
-  return score;
-}
-
-function rotateEmployees(employees: Employee[], dateKey: string) {
-  if (employees.length === 0) {
-    return [];
-  }
-
-  const sorted = [...employees].sort((a, b) => a.name.localeCompare(b.name));
-  const rotation = getRotationSeed(dateKey) % sorted.length;
-  return [...sorted.slice(rotation), ...sorted.slice(0, rotation)];
-}
-
-function getRotationSeed(dateKey: string) {
-  const weekStart = parseDateKey(toWeekStartKey(dateKey));
-  const yearStart = new Date(weekStart.getFullYear(), 0, 1);
-  return Math.floor((weekStart.getTime() - yearStart.getTime()) / (7 * 24 * 60 * 60 * 1000));
-}
-
-function groupAssignmentsByTemplate(
-  assignments: ScheduleAssignment[],
-  shiftTemplates: ShiftTemplate[],
-) {
-  const groups = new Map<string, ScheduleAssignment[]>();
-
-  assignments.forEach((assignment) => {
-    const template = shiftTemplates.find((item) => item.id === assignment.shiftTemplateId);
-    const key = assignment.customScheduleText ?? template?.scheduleText ?? "Sin horario";
-    groups.set(key, [...(groups.get(key) ?? []), assignment]);
-  });
-
-  return Array.from(groups.entries());
+function getAssignmentShiftKind(assignment: ScheduleAssignment) {
+  const start = parseTime(assignment.customStart1 ?? "06:00");
+  const end = parseTime(assignment.customEnd2 ?? assignment.customEnd1 ?? "12:00");
+  if (end >= 20 * 60) return "cierre";
+  if (start >= 12 * 60) return "tarde";
+  if (assignment.customStart2) return "partido";
+  return "manana";
 }
 
 function getHolidayName(date: Date, holidays: Holiday[]) {
-  const dateKey = formatDateKey(date);
-  const localHoliday = holidays.find(
-    (holiday) => holiday.active && holiday.date === dateKey,
-  );
-
-  if (localHoliday) {
-    return localHoliday.name;
-  }
-
-  return getCalculatedColombianHolidays(date.getFullYear()).get(dateKey);
+  const key = formatDateKey(date);
+  return holidays.find((holiday) => holiday.active && holiday.date === key)?.name ?? getCalculatedColombianHolidays(date.getFullYear()).get(key);
 }
 
 function getCalculatedColombianHolidays(year: number) {
   const holidays = new Map<string, string>();
   const add = (date: Date, name: string) => holidays.set(formatDateKey(date), name);
   const fixed = (month: number, day: number) => new Date(year, month - 1, day);
-
-  add(fixed(1, 1), "Año Nuevo");
-  add(moveToMonday(fixed(1, 6)), "Día de los Reyes Magos");
-  add(moveToMonday(fixed(3, 19)), "Día de San José");
-  add(fixed(5, 1), "Día del Trabajo");
+  add(fixed(1, 1), "Ano Nuevo");
+  add(moveToMonday(fixed(1, 6)), "Reyes Magos");
+  add(moveToMonday(fixed(3, 19)), "San Jose");
+  add(fixed(5, 1), "Dia del Trabajo");
   add(moveToMonday(fixed(6, 29)), "San Pedro y San Pablo");
-  add(fixed(7, 20), "Día de la Independencia");
-  add(fixed(8, 7), "Batalla de Boyacá");
-  add(moveToMonday(fixed(8, 15)), "Asunción de la Virgen");
-  add(moveToMonday(fixed(10, 12)), "Día de la Raza");
+  add(fixed(7, 20), "Independencia");
+  add(fixed(8, 7), "Batalla de Boyaca");
+  add(moveToMonday(fixed(8, 15)), "Asuncion de la Virgen");
+  add(moveToMonday(fixed(10, 12)), "Dia de la Raza");
   add(moveToMonday(fixed(11, 1)), "Todos los Santos");
   add(moveToMonday(fixed(11, 11)), "Independencia de Cartagena");
-  add(fixed(12, 8), "Inmaculada Concepción");
+  add(fixed(12, 8), "Inmaculada Concepcion");
   add(fixed(12, 25), "Navidad");
-
   const easter = getEasterDate(year);
   add(addDays(easter, -3), "Jueves Santo");
   add(addDays(easter, -2), "Viernes Santo");
-  add(moveToMonday(addDays(easter, 39)), "Ascensión del Señor");
+  add(moveToMonday(addDays(easter, 39)), "Ascension del Senor");
   add(moveToMonday(addDays(easter, 60)), "Corpus Christi");
-  add(moveToMonday(addDays(easter, 68)), "Sagrado Corazón");
-
+  add(moveToMonday(addDays(easter, 68)), "Sagrado Corazon");
   return holidays;
 }
 
 function moveToMonday(date: Date) {
   const day = date.getDay();
-  const offset = day === 1 ? 0 : (8 - day) % 7;
-  return addDays(date, offset);
+  return addDays(date, day === 1 ? 0 : (8 - day) % 7);
 }
 
 function getEasterDate(year: number) {
@@ -832,4 +857,25 @@ function getEasterDate(year: number) {
   const month = Math.floor((h + l - 7 * m + 114) / 31);
   const day = ((h + l - 7 * m + 114) % 31) + 1;
   return new Date(year, month - 1, day);
+}
+
+function minutesBetween(start: string, end: string) {
+  const startMinutes = parseTime(start);
+  let endMinutes = parseTime(end);
+  if (endMinutes < startMinutes) endMinutes += 24 * 60;
+  return endMinutes - startMinutes;
+}
+
+function parseTime(time: string) {
+  const [hours, minutes] = time.split(":").map(Number);
+  return hours * 60 + minutes;
+}
+
+function addHoursToTime(time: string, hours: number) {
+  const totalMinutes = parseTime(time) + Math.round(hours * 60);
+  return `${String(Math.floor(totalMinutes / 60) % 24).padStart(2, "0")}:${String(totalMinutes % 60).padStart(2, "0")}`;
+}
+
+function roundHours(value: number) {
+  return Math.round(value * 10) / 10;
 }

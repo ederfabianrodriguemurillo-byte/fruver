@@ -1,6 +1,6 @@
-export type Area = "Caja" | "Pedidos" | "Domicilios";
+export type Area = "Caja" | "Pedidos" | "Domicilios" | "Surtidores" | "Hornos";
 
-export type EmployeeType = "Fijo" | "Rotativo";
+export type EmployeeType = "Fijo" | "Rotativo" | "Apoyo";
 
 export type DayKey =
   | "lunes"
@@ -14,10 +14,18 @@ export type DayKey =
 export type DayKind = "normal" | "sabado" | "domingo" | "festivo" | "fuerte";
 
 export type CashRegister =
-  | "caja música"
-  | "caja Víctor"
+  | "caja musica"
+  | "caja Victor"
   | "caja pared"
   | "caja del medio";
+
+export type ExtraPosition = "final" | "antes-descanso" | "personalizado";
+
+export type UnavailabilityType =
+  | "Permiso"
+  | "Incapacidad"
+  | "Vacaciones"
+  | "No disponible";
 
 export interface Employee {
   id: string;
@@ -26,8 +34,10 @@ export interface Employee {
   secondaryAreas: Area[];
   type: EmployeeType;
   dayOff: DayKey;
-  baseShiftTemplateId: string;
+  baseShiftTemplateId?: string;
+  preferredShiftTemplateId?: string;
   note?: string;
+  phone?: string;
   active: boolean;
   normalHourlyRate?: number;
   overtimeHourlyRate?: number;
@@ -52,6 +62,17 @@ export interface Holiday {
   date: string;
   name: string;
   active: boolean;
+}
+
+export interface EmployeeUnavailability {
+  id: string;
+  employeeId: string;
+  date: string;
+  type: UnavailabilityType;
+  reason?: string;
+  allDay: boolean;
+  startTime?: string;
+  endTime?: string;
 }
 
 export interface PaymentSettings {
@@ -79,6 +100,12 @@ export interface ScheduleAssignment {
   customEnd2?: string;
   customTotalHours?: number;
   customScheduleText?: string;
+  normalHours?: number;
+  overtimeHours?: number;
+  overtimeManual?: boolean;
+  overtimeReason?: string;
+  breakMinutes?: number;
+  warningMessage?: string;
 }
 
 export interface DailySchedule {
@@ -97,6 +124,7 @@ export interface AppState {
   schedules: DailySchedule[];
   holidays: Holiday[];
   paymentSettings: PaymentSettings;
+  unavailability: EmployeeUnavailability[];
 }
 
 export interface EmployeeReportRow {
@@ -113,15 +141,17 @@ export interface EmployeeReportRow {
 export interface DailyReportRow {
   employeeId: string;
   employeeName: string;
-  area: string;
+  area: Area;
   day: string;
   date: string;
+  dayKind: DayKind;
   originalSchedule: string;
   finalSchedule: string;
   normalHours: number;
   automaticOvertime: number;
   manualOvertime: number;
   totalOvertime: number;
+  absence: string;
   note: string;
   restWarning: string;
 }
@@ -130,4 +160,13 @@ export interface DayProfile {
   kind: DayKind;
   isStrongSalesDay: boolean;
   holidayName?: string;
+}
+
+export interface AssignmentMetrics {
+  scheduleText: string;
+  totalHours: number;
+  normalHours: number;
+  overtimeHours: number;
+  breakMinutes?: number;
+  warningMessage?: string;
 }
