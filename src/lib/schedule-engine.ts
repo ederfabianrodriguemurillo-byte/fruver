@@ -668,9 +668,17 @@ export function generateWhatsAppMessage({
   unavailability?: EmployeeUnavailability[];
   includeUnavailability?: boolean;
 }) {
+  // Greeting adapts to time of day
+  const hour = new Date().getHours();
+  const greeting = hour < 12 ? "Buenos dias." : hour < 18 ? "Buenas tardes." : "Buenas noches.";
+
+  const isTomorrow = dateKey === getTomorrowKey();
+  const isToday = dateKey === getTodayKey();
+  const whenLabel = isTomorrow ? "mañana " : isToday ? "hoy " : "";
+
   const lines = [
-    "Buenas tardes.",
-    `Turnos para ${dateKey === getTomorrowKey() ? "manana " : ""}${formatLongDate(dateKey)}:`,
+    greeting,
+    `Turnos para ${whenLabel}${formatLongDate(dateKey)}:`,
     "",
   ];
 
@@ -678,7 +686,7 @@ export function generateWhatsAppMessage({
     const areaAssignments = schedule?.assignments.filter((assignment) => assignment.area === area) ?? [];
     if (!areaAssignments.length) return;
 
-    lines.push(`- ${area}`, "");
+    lines.push(`📌 ${area}`, "");
     const groups = new Map<string, ScheduleAssignment[]>();
     areaAssignments.forEach((assignment) => {
       const template = shiftTemplates.find((item) => item.id === assignment.shiftTemplateId);
@@ -687,32 +695,62 @@ export function generateWhatsAppMessage({
     });
 
     groups.forEach((assignments, text) => {
-      lines.push(text);
+      lines.push(`🕐 ${text}`);
       assignments.forEach((assignment) => {
         const employee = employees.find((item) => item.id === assignment.employeeId);
         if (!employee) return;
-        lines.push(`${employee.name}${assignment.cashRegister ? ` (${assignment.cashRegister})` : ""}`);
+
+        // Build employee line with all details
+        const parts: string[] = [employee.name];
+
+        // Cash register in parentheses
+        if (assignment.cashRegister) {
+          parts.push(`(${assignment.cashRegister})`);
+        }
+
+        // Note from assignment (e.g. "caja música", custom note, etc.)
+        const noteText = assignment.overtimeReason || assignment.note || employee.note;
+        if (noteText && noteText.trim()) {
+          // If the note is already included in the cash register label, skip it
+          const isAlreadyShown = assignment.cashRegister && assignment.cashRegister.toLowerCase().includes(noteText.toLowerCase());
+          if (!isAlreadyShown) {
+            parts.push(`- ${noteText.trim()}`);
+          }
+        }
+
+        // Mark manual overtime
+        if (assignment.overtimeManual) {
+          parts.push("⚡ hora extra");
+        }
+
+        lines.push(parts.join(" "));
       });
       lines.push("");
     });
   });
 
+  // Rest day employees
   const restDay = getDayKey(parseDateKey(dateKey));
   const resting = employees
     .filter((employee) => employee.active && employee.dayOff === restDay)
+    // Exclude employees that are already assigned (manual override)
+    .filter((employee) => !schedule?.assignments.some((a) => a.employeeId === employee.id))
     .sort((a, b) => a.name.localeCompare(b.name));
   if (resting.length) {
-    lines.push("- Descanso");
+    lines.push("😴 Descanso");
     resting.forEach((employee) => lines.push(employee.name));
     lines.push("");
   }
 
+  // Unavailability / permits
   const unavailable = unavailability.filter((item) => item.date === dateKey && item.allDay);
   if (includeUnavailability && unavailable.length) {
-    lines.push("- Permiso");
+    lines.push("🏥 Permiso");
     unavailable.forEach((item) => {
       const employee = employees.find((candidate) => candidate.id === item.employeeId);
-      if (employee) lines.push(employee.name);
+      if (!employee) return;
+      const reasonLabel = item.reason?.trim() ? ` (${item.type}: ${item.reason})` : ` (${item.type})`;
+      lines.push(`${employee.name}${reasonLabel}`);
     });
   }
 
@@ -720,6 +758,7 @@ export function generateWhatsAppMessage({
 }
 
 export function getScheduleWarnings({
+
   weekStart,
   schedules,
   employees,
