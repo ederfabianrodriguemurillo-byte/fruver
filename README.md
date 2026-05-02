@@ -40,8 +40,9 @@ La interfaz funciona con seed inicial y persistencia local del navegador. Si las
 
 1. Crea un proyecto en Supabase.
 2. Ejecuta `supabase/migrations/001_initial_schema.sql` en el SQL editor o con Supabase CLI.
-3. Ejecuta `supabase/seed.sql` para cargar turnos, empleados, festivos 2026 y configuración inicial.
-4. Configura las variables `NEXT_PUBLIC_SUPABASE_URL` y `NEXT_PUBLIC_SUPABASE_ANON_KEY`.
+3. Ejecuta las demás migraciones en orden, incluida `supabase/migrations/0004_enable_realtime.sql` para activar Supabase Realtime.
+4. Ejecuta `supabase/seed.sql` para cargar turnos, empleados, festivos 2026 y configuración inicial.
+5. Configura las variables `NEXT_PUBLIC_SUPABASE_URL` y `NEXT_PUBLIC_SUPABASE_ANON_KEY`.
 
 Tablas incluidas:
 

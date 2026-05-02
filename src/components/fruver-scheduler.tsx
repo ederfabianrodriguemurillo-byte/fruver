@@ -23,7 +23,7 @@ import {
   Users,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Dispatch, ReactNode, SetStateAction } from "react";
 import {
   areas,
@@ -224,6 +224,70 @@ export function FruverScheduler() {
   });
   const [includePermitsInWhatsApp, setIncludePermitsInWhatsApp] = useState(true);
   const [extraDraft, setExtraDraft] = useState<ExtraDraft | null>(null);
+  const [syncStatus, setSyncStatus] = useState<"idle" | "syncing" | "saving" | "live">("idle");
+  const applyingRemoteStateRef = useRef(false);
+  const hasLoadedSupabaseRef = useRef(false);
+  const isPersistingSupabaseRef = useRef(false);
+  const lastSyncedStateRef = useRef("");
+  const saveSupabaseTimerRef = useRef<number | null>(null);
+
+  const persistSupabaseState = useCallback(
+    async (nextState: AppState, showSuccessNotice = false) => {
+      if (!supabaseClient) {
+        if (showSuccessNotice) {
+          showNotice("warning", "Configura Supabase en .env.local");
+        }
+        return false;
+      }
+
+      setSyncStatus("saving");
+      isPersistingSupabaseRef.current = true;
+
+      const results = [
+        nextState.shiftTemplates.length
+          ? await supabaseClient.from("shift_templates").upsert(nextState.shiftTemplates.map(appTemplateToDb))
+          : null,
+        nextState.employees.length
+          ? await supabaseClient.from("employees").upsert(nextState.employees.map(appEmployeeToDb))
+          : null,
+        nextState.holidays.length ? await supabaseClient.from("holidays").upsert(nextState.holidays.map(appHolidayToDb)) : null,
+        await supabaseClient.from("payment_settings").upsert(appSettingsToDb(nextState.paymentSettings)),
+        await supabaseClient.from("employee_unavailability").delete().neq("id", "00000000-0000-0000-0000-000000000000"),
+      ];
+
+      if (nextState.unavailability.length) {
+        results.push(await supabaseClient.from("employee_unavailability").insert(nextState.unavailability.map(appUnavailableToDb)));
+      }
+
+      if (nextState.schedules.length) {
+        const scheduleDates = nextState.schedules.map((schedule) => schedule.date);
+        results.push(await supabaseClient.from("schedules").delete().in("schedule_date", scheduleDates));
+        results.push(await supabaseClient.from("schedules").insert(nextState.schedules.map(appScheduleToDb)));
+
+        const assignmentRows = nextState.schedules.flatMap((schedule) => schedule.assignments.map(appAssignmentToDb));
+        if (assignmentRows.length) {
+          results.push(await supabaseClient.from("schedule_assignments").insert(assignmentRows));
+        }
+      }
+
+      const error = results.find((result) => result?.error)?.error;
+      if (error) {
+        isPersistingSupabaseRef.current = false;
+        setSyncStatus("idle");
+        showNotice("warning", error.message);
+        return false;
+      }
+
+      lastSyncedStateRef.current = JSON.stringify(nextState);
+      isPersistingSupabaseRef.current = false;
+      setSyncStatus("live");
+      if (showSuccessNotice) {
+        showNotice("success", "Datos guardados en Supabase");
+      }
+      return true;
+    },
+    [supabaseClient],
+  );
 
   useEffect(() => {
     const timeout = window.setTimeout(() => {
@@ -240,6 +304,7 @@ export function FruverScheduler() {
     return () => window.clearTimeout(timeout);
   }, []);
 
+  // Auto-save to localStorage on state change
   useEffect(() => {
     if (!hydrated) return;
     const timeout = window.setTimeout(() => {
@@ -249,10 +314,92 @@ export function FruverScheduler() {
   }, [hydrated, state]);
 
   useEffect(() => {
+    if (!hydrated || !supabaseClient || !hasLoadedSupabaseRef.current) return;
+
+    const serializedState = JSON.stringify(state);
+    if (applyingRemoteStateRef.current) {
+      applyingRemoteStateRef.current = false;
+      lastSyncedStateRef.current = serializedState;
+      return;
+    }
+    if (serializedState === lastSyncedStateRef.current) return;
+
+    if (saveSupabaseTimerRef.current) {
+      window.clearTimeout(saveSupabaseTimerRef.current);
+    }
+    saveSupabaseTimerRef.current = window.setTimeout(() => {
+      setSyncStatus("saving");
+      void persistSupabaseState(state);
+    }, 900);
+
+    return () => {
+      if (saveSupabaseTimerRef.current) {
+        window.clearTimeout(saveSupabaseTimerRef.current);
+      }
+    };
+  }, [hydrated, persistSupabaseState, state, supabaseClient]);
+
+  // Supabase: initial load + real-time sync
+  useEffect(() => {
+    if (!supabaseClient) return;
+
+    const initialLoadTimer = window.setTimeout(() => {
+      setSyncStatus("syncing");
+      void loadSupabaseData();
+    }, 0);
+
+    // Set up Realtime channel — listens to any INSERT/UPDATE/DELETE
+    const channel = supabaseClient
+      .channel("fruver-realtime")
+      .on("postgres_changes", { event: "*", schema: "public", table: "shift_templates" }, () => {
+        if (isPersistingSupabaseRef.current) return;
+        void loadSupabaseData();
+      })
+      .on("postgres_changes", { event: "*", schema: "public", table: "employees" }, () => {
+        if (isPersistingSupabaseRef.current) return;
+        void loadSupabaseData();
+      })
+      .on("postgres_changes", { event: "*", schema: "public", table: "holidays" }, () => {
+        if (isPersistingSupabaseRef.current) return;
+        void loadSupabaseData();
+      })
+      .on("postgres_changes", { event: "*", schema: "public", table: "payment_settings" }, () => {
+        if (isPersistingSupabaseRef.current) return;
+        void loadSupabaseData();
+      })
+      .on("postgres_changes", { event: "*", schema: "public", table: "schedules" }, () => {
+        if (isPersistingSupabaseRef.current) return;
+        void loadSupabaseData();
+      })
+      .on("postgres_changes", { event: "*", schema: "public", table: "schedule_assignments" }, () => {
+        if (isPersistingSupabaseRef.current) return;
+        void loadSupabaseData();
+      })
+      .on("postgres_changes", { event: "*", schema: "public", table: "employee_unavailability" }, () => {
+        if (isPersistingSupabaseRef.current) return;
+        void loadSupabaseData();
+      })
+      .subscribe((status) => {
+        if (status === "SUBSCRIBED") setSyncStatus("live");
+        if (status === "CLOSED" || status === "CHANNEL_ERROR") setSyncStatus("idle");
+      });
+
+    return () => {
+      if (saveSupabaseTimerRef.current) {
+        window.clearTimeout(saveSupabaseTimerRef.current);
+      }
+      window.clearTimeout(initialLoadTimer);
+      supabaseClient.removeChannel(channel);
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
     if (!notice) return;
     const timeout = window.setTimeout(() => setNotice(null), 3200);
     return () => window.clearTimeout(timeout);
   }, [notice]);
+
 
   const activeEmployees = state.employees.filter((employee) => employee.active);
   const selectedSchedule = state.schedules.find((schedule) => schedule.date === selectedDate);
@@ -719,11 +866,12 @@ export function FruverScheduler() {
     ]);
     const error = templates.error ?? employees.error ?? holidays.error ?? settings.error ?? schedules.error ?? assignments.error ?? unavailable.error;
     if (error) {
+      setSyncStatus("idle");
       showNotice("warning", error.message);
       return;
     }
     const assignmentRows = assignments.data ?? [];
-    setState({
+    const nextState = {
       employees: employees.data?.map(dbEmployeeToApp) ?? [],
       shiftTemplates: templates.data?.map(dbTemplateToApp) ?? [],
       holidays: holidays.data?.map(dbHolidayToApp) ?? [],
@@ -739,37 +887,17 @@ export function FruverScheduler() {
           generatedAt: schedule.generated_at,
           assignments: assignmentRows.filter((assignment) => assignment.schedule_id === schedule.id).map(dbAssignmentToApp),
         })) ?? [],
-    });
-    showNotice("success", "Datos importados desde Supabase");
+    };
+    applyingRemoteStateRef.current = true;
+    hasLoadedSupabaseRef.current = true;
+    lastSyncedStateRef.current = JSON.stringify(nextState);
+    setState(nextState);
+    setSyncStatus("live");
   }
 
   async function saveSupabaseData() {
-    if (!supabaseClient) {
-      showNotice("warning", "Configura Supabase en .env.local");
-      return;
-    }
-    const results = [
-      await supabaseClient.from("shift_templates").upsert(state.shiftTemplates.map(appTemplateToDb)),
-      await supabaseClient.from("employees").upsert(state.employees.map(appEmployeeToDb)),
-      await supabaseClient.from("holidays").upsert(state.holidays.map(appHolidayToDb)),
-      await supabaseClient.from("payment_settings").upsert(appSettingsToDb(state.paymentSettings)),
-      await supabaseClient.from("employee_unavailability").upsert(state.unavailability.map(appUnavailableToDb)),
-    ];
-    if (state.schedules.length) {
-      const scheduleIds = state.schedules.map((schedule) => schedule.id);
-      results.push(await supabaseClient.from("schedule_assignments").delete().in("schedule_id", scheduleIds));
-      results.push(await supabaseClient.from("schedules").upsert(state.schedules.map(appScheduleToDb)));
-      const assignmentRows = state.schedules.flatMap((schedule) => schedule.assignments.map(appAssignmentToDb));
-      if (assignmentRows.length) {
-        results.push(await supabaseClient.from("schedule_assignments").insert(assignmentRows));
-      }
-    }
-    const error = results.find((result) => result.error)?.error;
-    if (error) {
-      showNotice("warning", error.message);
-      return;
-    }
-    showNotice("success", "Datos guardados en Supabase");
+    hasLoadedSupabaseRef.current = true;
+    await persistSupabaseState(state, true);
   }
 
   return (
@@ -800,6 +928,21 @@ export function FruverScheduler() {
           </nav>
 
           <div className="flex items-center gap-2 pr-14 lg:pr-0">
+            {/* Real-time sync indicator */}
+            <span className={`hidden items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-bold lg:inline-flex ${
+              syncStatus === "live"
+                ? "bg-emerald-100 text-emerald-800"
+                : syncStatus === "saving"
+                  ? "bg-sky-100 text-sky-800"
+                : syncStatus === "syncing"
+                  ? "bg-amber-100 text-amber-800"
+                  : "bg-stone-100 text-stone-500"
+            }`}>
+              <span className={`size-1.5 rounded-full ${
+                syncStatus === "live" ? "bg-emerald-500 animate-pulse" : syncStatus === "saving" ? "bg-sky-500 animate-pulse" : syncStatus === "syncing" ? "bg-amber-400" : "bg-stone-400"
+              }`} />
+              {syncStatus === "live" ? "En vivo" : syncStatus === "saving" ? "Guardando..." : syncStatus === "syncing" ? "Sincronizando..." : "Local"}
+            </span>
             <button className={desktopSecondaryButton} onClick={() => selectSection("WhatsApp")}>
               <MessageCircle className="size-4" />
               WhatsApp
@@ -809,6 +952,7 @@ export function FruverScheduler() {
               Generar
             </button>
           </div>
+
         </div>
         {mobileMenuOpen ? (
           <div className="mx-auto mt-3 grid max-w-7xl gap-2 rounded-lg border border-stone-200 bg-white p-2 shadow-lg lg:hidden">
@@ -1689,7 +1833,7 @@ function SettingsSection({
         </div>
         <div className="mt-4 rounded-lg border border-stone-200 bg-stone-50 p-3 text-sm">
           <p className="font-semibold">Supabase: {supabaseReady ? "Configurado" : "Pendiente"}</p>
-          <p className="text-stone-500">localStorage sigue como respaldo local del navegador.</p>
+          <p className="text-stone-500">Los cambios se guardan automaticamente y localStorage queda como respaldo local.</p>
         </div>
         <div className="mt-4 grid gap-2 sm:grid-cols-2"><button className={secondaryButton} onClick={loadSupabaseData}><Download className="size-4" />Importar</button><button className={primaryButton} onClick={saveSupabaseData}><Save className="size-4" />Guardar</button></div>
         <button className={`${dangerButton} mt-3`} onClick={resetDemoData}><RefreshCcw className="size-4" />Restaurar seed</button>
