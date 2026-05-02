@@ -230,6 +230,7 @@ export function FruverScheduler() {
   const isPersistingSupabaseRef = useRef(false);
   const lastSyncedStateRef = useRef("");
   const saveSupabaseTimerRef = useRef<number | null>(null);
+  const stateRef = useRef<AppState>(initialState);
 
   const persistSupabaseState = useCallback(
     async (nextState: AppState, showSuccessNotice = false) => {
@@ -307,6 +308,7 @@ export function FruverScheduler() {
   // Auto-save to localStorage on state change
   useEffect(() => {
     if (!hydrated) return;
+    stateRef.current = state;
     const timeout = window.setTimeout(() => {
       window.localStorage.setItem(storageKey, JSON.stringify(state));
     }, 500);
@@ -341,7 +343,7 @@ export function FruverScheduler() {
 
   // Supabase: initial load + real-time sync
   useEffect(() => {
-    if (!supabaseClient) return;
+    if (!hydrated || !supabaseClient) return;
 
     const initialLoadTimer = window.setTimeout(() => {
       setSyncStatus("syncing");
@@ -392,7 +394,7 @@ export function FruverScheduler() {
       supabaseClient.removeChannel(channel);
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [hydrated, supabaseClient]);
 
   useEffect(() => {
     if (!notice) return;
@@ -888,6 +890,13 @@ export function FruverScheduler() {
           assignments: assignmentRows.filter((assignment) => assignment.schedule_id === schedule.id).map(dbAssignmentToApp),
         })) ?? [],
     };
+    const localState = stateRef.current;
+    if (!hasLoadedSupabaseRef.current && shouldUploadLocalState(localState, nextState)) {
+      hasLoadedSupabaseRef.current = true;
+      await persistSupabaseState(localState);
+      showNotice("success", "Datos locales subidos a Supabase para sincronizar tus dispositivos");
+      return;
+    }
     applyingRemoteStateRef.current = true;
     hasLoadedSupabaseRef.current = true;
     lastSyncedStateRef.current = JSON.stringify(nextState);
@@ -1916,6 +1925,12 @@ function normalizeState(value: Partial<AppState>): AppState {
     paymentSettings: value.paymentSettings ?? paymentDefaults,
     unavailability: value.unavailability ?? [],
   };
+}
+
+function shouldUploadLocalState(localState: AppState, remoteState: AppState) {
+  const remoteHasWorkData = remoteState.schedules.length > 0 || remoteState.unavailability.length > 0;
+  const localHasWorkData = localState.schedules.length > 0 || localState.unavailability.length > 0;
+  return localHasWorkData && !remoteHasWorkData;
 }
 
 function upsertById<T extends { id: string }>(items: T[], item: T) {
