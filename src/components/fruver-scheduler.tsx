@@ -19,6 +19,7 @@ import {
   Settings,
   Store,
   Trash2,
+  UploadCloud,
   UserX,
   Users,
   X,
@@ -233,7 +234,7 @@ export function FruverScheduler() {
   const stateRef = useRef<AppState>(initialState);
 
   const persistSupabaseState = useCallback(
-    async (nextState: AppState, showSuccessNotice = false) => {
+    async (nextState: AppState, showSuccessNotice = false, mode: "merge" | "replace" = "merge") => {
       if (!supabaseClient) {
         if (showSuccessNotice) {
           showNotice("warning", "Configura Supabase en .env.local");
@@ -244,25 +245,47 @@ export function FruverScheduler() {
       setSyncStatus("saving");
       isPersistingSupabaseRef.current = true;
 
-      const results = [
+      const results = [];
+      if (mode === "replace") {
+        results.push(await supabaseClient.from("schedule_assignments").delete().neq("id", "00000000-0000-0000-0000-000000000000"));
+        results.push(await supabaseClient.from("schedules").delete().neq("id", "00000000-0000-0000-0000-000000000000"));
+        results.push(await supabaseClient.from("employee_unavailability").delete().neq("id", "00000000-0000-0000-0000-000000000000"));
+        results.push(await supabaseClient.from("employees").delete().neq("id", "00000000-0000-0000-0000-000000000000"));
+        results.push(await supabaseClient.from("shift_templates").delete().neq("id", "00000000-0000-0000-0000-000000000000"));
+        results.push(await supabaseClient.from("holidays").delete().neq("id", "00000000-0000-0000-0000-000000000000"));
+        results.push(await supabaseClient.from("payment_settings").delete().neq("id", "00000000-0000-0000-0000-000000000000"));
+      }
+
+      results.push(
         nextState.shiftTemplates.length
           ? await supabaseClient.from("shift_templates").upsert(nextState.shiftTemplates.map(appTemplateToDb))
           : null,
+      );
+      results.push(
         nextState.employees.length
           ? await supabaseClient.from("employees").upsert(nextState.employees.map(appEmployeeToDb))
           : null,
+      );
+      results.push(
         nextState.holidays.length ? await supabaseClient.from("holidays").upsert(nextState.holidays.map(appHolidayToDb)) : null,
+      );
+      results.push(
         await supabaseClient.from("payment_settings").upsert(appSettingsToDb(nextState.paymentSettings)),
-        await supabaseClient.from("employee_unavailability").delete().neq("id", "00000000-0000-0000-0000-000000000000"),
-      ];
+      );
+
+      if (mode === "merge") {
+        results.push(await supabaseClient.from("employee_unavailability").delete().neq("id", "00000000-0000-0000-0000-000000000000"));
+      }
 
       if (nextState.unavailability.length) {
         results.push(await supabaseClient.from("employee_unavailability").insert(nextState.unavailability.map(appUnavailableToDb)));
       }
 
       if (nextState.schedules.length) {
-        const scheduleDates = nextState.schedules.map((schedule) => schedule.date);
-        results.push(await supabaseClient.from("schedules").delete().in("schedule_date", scheduleDates));
+        if (mode === "merge") {
+          const scheduleDates = nextState.schedules.map((schedule) => schedule.date);
+          results.push(await supabaseClient.from("schedules").delete().in("schedule_date", scheduleDates));
+        }
         results.push(await supabaseClient.from("schedules").insert(nextState.schedules.map(appScheduleToDb)));
 
         const assignmentRows = nextState.schedules.flatMap((schedule) => schedule.assignments.map(appAssignmentToDb));
@@ -283,7 +306,7 @@ export function FruverScheduler() {
       isPersistingSupabaseRef.current = false;
       setSyncStatus("live");
       if (showSuccessNotice) {
-        showNotice("success", "Datos guardados en Supabase");
+        showNotice("success", mode === "replace" ? "Datos de este navegador publicados para todos" : "Datos guardados en Supabase");
       }
       return true;
     },
@@ -478,17 +501,20 @@ export function FruverScheduler() {
           ? [generationDate]
           : getWeekDates(toWeekStartKey(generationDate));
 
-    const generated = dates.map((dateKey) =>
-      generateScheduleForDate({
+    let scheduleHistory = state.schedules;
+    const generated = dates.map((dateKey) => {
+      const schedule = generateScheduleForDate({
         dateKey,
         employees: state.employees,
         shiftTemplates: state.shiftTemplates,
         holidays: state.holidays,
         paymentSettings: state.paymentSettings,
-        schedules: state.schedules,
+        schedules: scheduleHistory,
         unavailability: state.unavailability,
-      }),
-    );
+      });
+      scheduleHistory = replaceSchedules(scheduleHistory, [schedule]);
+      return schedule;
+    });
 
     setState((current) => ({ ...current, schedules: replaceSchedules(current.schedules, generated) }));
     setSelectedDate(dates[0]);
@@ -909,6 +935,14 @@ export function FruverScheduler() {
     await persistSupabaseState(state, true);
   }
 
+  async function publishBrowserData() {
+    if (!window.confirm("Esto reemplaza los datos de Supabase con los datos visibles en este navegador. Despues, los otros navegadores y el celular veran esta misma informacion. Deseas continuar?")) {
+      return;
+    }
+    hasLoadedSupabaseRef.current = true;
+    await persistSupabaseState(state, true, "replace");
+  }
+
   return (
     <div className="min-h-screen bg-[#f7f8f3] text-stone-950">
       <header className="sticky top-0 z-30 border-b border-stone-200 bg-[#f7f8f3]/95 px-4 py-3 backdrop-blur">
@@ -1099,6 +1133,7 @@ export function FruverScheduler() {
             supabaseReady={Boolean(supabaseClient)}
             loadSupabaseData={loadSupabaseData}
             saveSupabaseData={saveSupabaseData}
+            publishBrowserData={publishBrowserData}
           />
         ) : null}
       </main>
@@ -1814,6 +1849,7 @@ function SettingsSection({
   supabaseReady,
   loadSupabaseData,
   saveSupabaseData,
+  publishBrowserData,
 }: {
   settings: PaymentSettings;
   updatePaymentSettings: (patch: Partial<PaymentSettings>) => void;
@@ -1826,6 +1862,7 @@ function SettingsSection({
   supabaseReady: boolean;
   loadSupabaseData: () => void;
   saveSupabaseData: () => void;
+  publishBrowserData: () => void;
 }) {
   return (
     <div className="grid gap-4 xl:grid-cols-[0.8fr_1.2fr]">
@@ -1844,7 +1881,11 @@ function SettingsSection({
           <p className="font-semibold">Supabase: {supabaseReady ? "Configurado" : "Pendiente"}</p>
           <p className="text-stone-500">Los cambios se guardan automaticamente y localStorage queda como respaldo local.</p>
         </div>
-        <div className="mt-4 grid gap-2 sm:grid-cols-2"><button className={secondaryButton} onClick={loadSupabaseData}><Download className="size-4" />Importar</button><button className={primaryButton} onClick={saveSupabaseData}><Save className="size-4" />Guardar</button></div>
+        <div className="mt-4 grid gap-2 sm:grid-cols-2">
+          <button className={secondaryButton} onClick={loadSupabaseData}><Download className="size-4" />Traer datos de la nube</button>
+          <button className={secondaryButton} onClick={saveSupabaseData}><Save className="size-4" />Guardar cambios</button>
+        </div>
+        <button className={`${primaryButton} mt-3 w-full`} onClick={publishBrowserData}><UploadCloud className="size-4" />Publicar este navegador para todos</button>
         <button className={`${dangerButton} mt-3`} onClick={resetDemoData}><RefreshCcw className="size-4" />Restaurar seed</button>
       </section>
       <section className={panelClass}>

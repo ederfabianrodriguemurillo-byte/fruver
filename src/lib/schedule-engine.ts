@@ -440,14 +440,14 @@ export function scoreEmployeeForShift(
   if (employee.dayOff === context.dayKey) return 9500;
   if (hasAllDayUnavailability(employee.id, dateKey, context.unavailability)) return 9000;
 
-  const recentAssignments = context.schedules
+  const allAssignmentsBefore = context.schedules
     .filter((schedule) => schedule.date < dateKey)
     .flatMap((schedule) =>
       schedule.assignments
         .filter((assignment) => assignment.employeeId === employee.id)
         .map((assignment) => ({ schedule, assignment })),
-    )
-    .slice(-12);
+    );
+  const recentAssignments = allAssignmentsBefore.slice(-12);
 
   const shiftKind = getShiftKind(shift);
   let score = employee.primaryArea === context.area ? 0 : 12;
@@ -473,6 +473,20 @@ export function scoreEmployeeForShift(
 
   if (weeklyHours + shift.totalHours > context.paymentSettings.weeklyNormalHours) {
     score += 12;
+  }
+  score += Math.min(18, weeklyHours * 0.8);
+
+  if (!allAssignmentsBefore.length) {
+    score -= 18;
+  } else {
+    score += Math.min(12, allAssignmentsBefore.length * 1.5);
+    const lastAssignment = allAssignmentsBefore.at(-1);
+    if (lastAssignment) {
+      const daysSinceLast = daysBetween(lastAssignment.schedule.date, dateKey);
+      if (daysSinceLast <= 1) score += 10;
+      else if (daysSinceLast <= 3) score += 5;
+      else if (daysSinceLast >= 7) score -= 6;
+    }
   }
 
   const profile = getDayProfile(dateKey, []);
@@ -820,6 +834,11 @@ function templateWeight(template: ShiftTemplate, profile: DayProfile) {
 
 function canWorkArea(employee: Employee, area: Area) {
   return employee.primaryArea === area || employee.secondaryAreas.includes(area);
+}
+
+function daysBetween(fromDateKey: string, toDateKey: string) {
+  const millisecondsPerDay = 24 * 60 * 60 * 1000;
+  return Math.round((parseDateKey(toDateKey).getTime() - parseDateKey(fromDateKey).getTime()) / millisecondsPerDay);
 }
 
 function hasAllDayUnavailability(employeeId: string, dateKey: string, unavailability: EmployeeUnavailability[]) {
