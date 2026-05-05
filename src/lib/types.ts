@@ -170,3 +170,41 @@ export interface AssignmentMetrics {
   breakMinutes?: number;
   warningMessage?: string;
 }
+
+export interface CashierExcelRow {
+  employeeId: string;
+  employeeName: string;
+  mondayToFriday: string;
+  saturday: string;
+  sunday: string;
+  restDay: string;
+  cashRegister: string;
+}
+
+export interface AreaExcelRow {
+  employeeId: string;
+  employeeName: string;
+  mondayToSunday: string;
+  restDay: string;
+}
+
+export interface WeeklyExcelSummaryRow {
+  employeeId: string;
+  employeeName: string;
+  area: Area;
+  normalHours: number;
+  overtimeHours: number;
+  manualOvertimeHours: number;
+  permits: number;
+  warnings: string;
+}
+
+export interface AreaScheduleTables {
+  weekStart: string;
+  weekEnd: string;
+  title: string;
+  caja: CashierExcelRow[];
+  pedidos: AreaExcelRow[];
+  domicilios: AreaExcelRow[];
+  summary: WeeklyExcelSummaryRow[];
+}

@@ -47,6 +47,8 @@ import {
   formatHours,
   formatLongDate,
   formatScheduleText,
+  generateAreaScheduleTables,
+  exportScheduleToExcel,
   generateScheduleForDate,
   generateSmartSchedule,
   generateWhatsAppMessage,
@@ -70,8 +72,11 @@ import {
 import { getSupabaseBrowserClient } from "@/lib/supabase";
 import type {
   AppState,
+  AreaExcelRow,
+  AreaScheduleTables,
   Area,
   CashRegister,
+  CashierExcelRow,
   DailyReportRow,
   DailySchedule,
   DayKey,
@@ -94,6 +99,7 @@ type Section =
   | "Turnos"
   | "Generar"
   | "WhatsApp"
+  | "Tabla Excel"
   | "Reportes"
   | "Configuracion";
 
@@ -118,6 +124,7 @@ const navItems: { label: Section; icon: typeof Store }[] = [
   { label: "Turnos", icon: Clock3 },
   { label: "Generar", icon: CalendarDays },
   { label: "WhatsApp", icon: MessageCircle },
+  { label: "Tabla Excel", icon: FileSpreadsheet },
   { label: "Reportes", icon: BarChart3 },
   { label: "Configuracion", icon: Settings },
 ];
@@ -218,6 +225,7 @@ export function FruverScheduler() {
     cashRegister: cashRegisters[0] as CashRegister,
   });
   const [reportWeek, setReportWeek] = useState(currentWeekStart);
+  const [excelWeek, setExcelWeek] = useState(currentWeekStart);
   const [compareWeek, setCompareWeek] = useState(() => {
     const previous = parseDateKey(currentWeekStart);
     previous.setDate(previous.getDate() - 7);
@@ -483,6 +491,17 @@ export function FruverScheduler() {
     unavailability: state.unavailability,
     includeUnavailability: includePermitsInWhatsApp,
   });
+  const excelTables = useMemo(
+    () =>
+      generateAreaScheduleTables({
+        weekStart: excelWeek,
+        schedules: state.schedules,
+        employees: state.employees,
+        shiftTemplates: state.shiftTemplates,
+        unavailability: state.unavailability,
+      }),
+    [excelWeek, state.employees, state.schedules, state.shiftTemplates, state.unavailability],
+  );
 
   function showNotice(kind: NonNullable<Notice>["kind"], message: string) {
     setNotice({ kind, message });
@@ -519,8 +538,15 @@ export function FruverScheduler() {
     setState((current) => ({ ...current, schedules: replaceSchedules(current.schedules, generated) }));
     setSelectedDate(dates[0]);
     setReportWeek(toWeekStartKey(dates[0]));
+    setExcelWeek(toWeekStartKey(dates[0]));
     selectSection("Generar");
     showNotice("success", "Turnos generados con rotacion inteligente");
+  }
+
+  function openExcelTableView(dateKey = selectedDate) {
+    setExcelWeek(toWeekStartKey(dateKey));
+    selectSection("Tabla Excel");
+    showNotice("success", "Tabla Excel generada");
   }
 
   function handleSuggestSmartSchedules() {
@@ -547,6 +573,7 @@ export function FruverScheduler() {
     }));
     setSelectedDate(dates[0]);
     setReportWeek(toWeekStartKey(dates[0]));
+    setExcelWeek(toWeekStartKey(dates[0]));
     selectSection("Generar");
     showNotice("success", "Propuesta inteligente generada. Puedes editarla antes de usarla.");
   }
@@ -808,6 +835,7 @@ export function FruverScheduler() {
     setState((current) => ({ ...current, schedules: replaceSchedules(current.schedules, duplicated) }));
     setSelectedDate(targetWeekStart);
     setReportWeek(targetWeekStart);
+    setExcelWeek(targetWeekStart);
     selectSection("Generar");
     showNotice("success", "Semana duplicada");
   }
@@ -851,6 +879,15 @@ export function FruverScheduler() {
       )
       .join("")}</tbody></table></body></html>`;
     triggerDownload(`reporte-horas-extra-${reportWeek}.xls`, new Blob([html], { type: "application/vnd.ms-excel;charset=utf-8" }));
+  }
+
+  async function handleExportScheduleExcel() {
+    try {
+      await exportScheduleToExcel(excelTables);
+      showNotice("success", "Archivo Excel generado");
+    } catch {
+      showNotice("warning", "No se pudo generar el Excel. Revisa que el navegador permita descargas.");
+    }
   }
 
   function addHoliday() {
@@ -1103,6 +1140,16 @@ export function FruverScheduler() {
             schedule={selectedSchedule}
             includePermits={includePermitsInWhatsApp}
             setIncludePermits={setIncludePermitsInWhatsApp}
+          />
+        ) : null}
+
+        {activeSection === "Tabla Excel" ? (
+          <ExcelTablesSection
+            weekStart={excelWeek}
+            setWeekStart={setExcelWeek}
+            tables={excelTables}
+            generateTable={() => openExcelTableView(excelWeek)}
+            exportExcel={handleExportScheduleExcel}
           />
         ) : null}
 
@@ -1748,6 +1795,127 @@ function WhatsAppSection({
       </section>
     </div>
   );
+}
+
+function ExcelTablesSection({
+  weekStart,
+  setWeekStart,
+  tables,
+  generateTable,
+  exportExcel,
+}: {
+  weekStart: string;
+  setWeekStart: (week: string) => void;
+  tables: AreaScheduleTables;
+  generateTable: () => void;
+  exportExcel: () => void;
+}) {
+  return (
+    <div className="space-y-4">
+      <section className={panelClass}>
+        <div className="grid gap-3 lg:grid-cols-[1fr_auto_auto] lg:items-end">
+          <Field label="Semana">
+            <input className={inputClass} type="date" value={weekStart} onChange={(event) => setWeekStart(toWeekStartKey(event.target.value))} />
+          </Field>
+          <button className={secondaryButton} onClick={generateTable}>
+            <FileSpreadsheet className="size-4" />
+            Generar tabla Excel
+          </button>
+          <button className={primaryButton} onClick={exportExcel}>
+            <Download className="size-4" />
+            Exportar a Excel
+          </button>
+        </div>
+        <p className="mt-3 rounded-lg border border-emerald-100 bg-emerald-50 p-3 text-sm font-medium text-emerald-900">
+          La tabla usa el horario final editado: permisos, descansos, cajas asignadas y horas extra manuales ya aplicadas.
+        </p>
+      </section>
+
+      <ExcelCashierTable rows={tables.caja} title={tables.title} />
+      <ExcelSimpleAreaTable title="PEDIDOS" rows={tables.pedidos} firstColumn="PEDIDOS" headerColor="bg-sky-100" />
+      <ExcelSimpleAreaTable title="DOMICILIOS" rows={tables.domicilios} firstColumn="DOMICILIARIOS" headerColor="bg-orange-100" />
+    </div>
+  );
+}
+
+function ExcelCashierTable({ rows, title }: { rows: CashierExcelRow[]; title: string }) {
+  return (
+    <section className="overflow-hidden rounded-lg border border-stone-300 bg-white shadow-sm">
+      <div className="border-b border-stone-300 bg-emerald-100 px-4 py-3 text-center text-lg font-black tracking-normal text-stone-900">{title}</div>
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[900px] border-collapse text-center text-sm">
+          <thead>
+            <tr className="bg-emerald-50 text-xs font-black uppercase text-stone-800">
+              <ExcelTh>Equipo cajas y punteros</ExcelTh>
+              <ExcelTh>De lunes a viernes</ExcelTh>
+              <ExcelTh>Sabado</ExcelTh>
+              <ExcelTh>Domingo</ExcelTh>
+              <ExcelTh>Descanso</ExcelTh>
+              <ExcelTh>Caja / puesto</ExcelTh>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.length ? rows.map((row) => (
+              <tr key={row.employeeId} className="odd:bg-white even:bg-stone-50">
+                <ExcelTd bold>{row.employeeName}</ExcelTd>
+                <ExcelTd>{row.mondayToFriday}</ExcelTd>
+                <ExcelTd>{row.saturday}</ExcelTd>
+                <ExcelTd>{row.sunday}</ExcelTd>
+                <ExcelTd>{row.restDay}</ExcelTd>
+                <ExcelTd>{row.cashRegister || "-"}</ExcelTd>
+              </tr>
+            )) : <tr><ExcelTd colSpan={6}>Sin cajeros en esta semana</ExcelTd></tr>}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+function ExcelSimpleAreaTable({
+  title,
+  rows,
+  firstColumn,
+  headerColor,
+}: {
+  title: string;
+  rows: AreaExcelRow[];
+  firstColumn: string;
+  headerColor: string;
+}) {
+  return (
+    <section className="overflow-hidden rounded-lg border border-stone-300 bg-white shadow-sm">
+      <div className={`border-b border-stone-300 px-4 py-3 text-center text-lg font-black tracking-normal text-stone-900 ${headerColor}`}>{title}</div>
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[680px] border-collapse text-center text-sm">
+          <thead>
+            <tr className={`${headerColor} text-xs font-black uppercase text-stone-800`}>
+              <ExcelTh>{firstColumn}</ExcelTh>
+              <ExcelTh>De lunes a domingo</ExcelTh>
+              <ExcelTh>Descanso</ExcelTh>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.length ? rows.map((row) => (
+              <tr key={row.employeeId} className="odd:bg-white even:bg-stone-50">
+                <ExcelTd bold>{row.employeeName}</ExcelTd>
+                <ExcelTd>{row.mondayToSunday}</ExcelTd>
+                <ExcelTd>{row.restDay}</ExcelTd>
+              </tr>
+            )) : <tr><ExcelTd colSpan={3}>Sin datos en esta semana</ExcelTd></tr>}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+function ExcelTh({ children }: { children: ReactNode }) {
+  return <th className="border border-stone-300 px-3 py-3 align-middle">{children}</th>;
+}
+
+function ExcelTd({ children, bold = false, colSpan }: { children: ReactNode; bold?: boolean; colSpan?: number }) {
+  return <td colSpan={colSpan} className={`border border-stone-300 px-3 py-3 align-middle ${bold ? "font-black" : "font-semibold"}`}>{children}</td>;
 }
 
 function ReportsSection({

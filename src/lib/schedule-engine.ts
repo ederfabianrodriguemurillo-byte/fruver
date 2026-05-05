@@ -1,7 +1,10 @@
 import { areas, cashRegisters } from "./seed-data";
 import type {
+  AreaExcelRow,
+  AreaScheduleTables,
   Area,
   AssignmentMetrics,
+  CashierExcelRow,
   DailyReportRow,
   DailySchedule,
   DayKey,
@@ -15,6 +18,7 @@ import type {
   PaymentSettings,
   ScheduleAssignment,
   ShiftTemplate,
+  WeeklyExcelSummaryRow,
 } from "./types";
 
 const dayKeys: DayKey[] = [
@@ -667,6 +671,98 @@ export function calculateDailyReport({
   return rows.sort((a, b) => a.date.localeCompare(b.date) || a.employeeName.localeCompare(b.employeeName));
 }
 
+export function generateAreaScheduleTables({
+  weekStart,
+  schedules,
+  employees,
+  shiftTemplates,
+  unavailability = [],
+}: {
+  weekStart: string;
+  schedules: DailySchedule[];
+  employees: Employee[];
+  shiftTemplates: ShiftTemplate[];
+  unavailability?: EmployeeUnavailability[];
+}): AreaScheduleTables {
+  const weekDates = getWeekDates(weekStart);
+  const weekEnd = weekDates[6] ?? weekStart;
+  const activeEmployees = employees.filter((employee) => employee.active);
+  const assignmentsByEmployee = getWeeklyAssignmentsByEmployee(weekDates, schedules);
+  const allDayPermits = getAllDayPermitsByEmployeeDate(weekDates, unavailability);
+
+  const cajaEmployees = getEmployeesForArea("Caja", activeEmployees, assignmentsByEmployee);
+  const pedidosEmployees = getEmployeesForArea("Pedidos", activeEmployees, assignmentsByEmployee);
+  const domiciliosEmployees = getEmployeesForArea("Domicilios", activeEmployees, assignmentsByEmployee);
+
+  return {
+    weekStart,
+    weekEnd,
+    title: `SEMANA DEL ${formatLongDate(weekStart).toUpperCase()} AL ${formatLongDate(weekEnd).toUpperCase()}`,
+    caja: cajaEmployees.map((employee) =>
+      buildCashierExcelRow(employee, weekDates, assignmentsByEmployee, shiftTemplates, allDayPermits),
+    ),
+    pedidos: pedidosEmployees.map((employee) =>
+      buildAreaExcelRow(employee, "Pedidos", weekDates, assignmentsByEmployee, shiftTemplates, allDayPermits),
+    ),
+    domicilios: domiciliosEmployees.map((employee) =>
+      buildAreaExcelRow(employee, "Domicilios", weekDates, assignmentsByEmployee, shiftTemplates, allDayPermits),
+    ),
+    summary: buildWeeklyExcelSummary(activeEmployees, weekDates, assignmentsByEmployee, unavailability),
+  };
+}
+
+export function generateExcelTableView(args: Parameters<typeof generateAreaScheduleTables>[0]) {
+  return generateAreaScheduleTables(args);
+}
+
+export async function exportScheduleToExcel(tables: AreaScheduleTables) {
+  const XLSX = await import("xlsx");
+  const workbook = XLSX.utils.book_new();
+
+  const cashierRows = [
+    [tables.title],
+    ["EQUIPO CAJAS Y PUNTEROS", "DE LUNES A VIERNES", "SABADO", "DOMINGO", "DESCANSO", "CAJA / PUESTO"],
+    ...tables.caja.map((row) => [
+      row.employeeName,
+      row.mondayToFriday,
+      row.saturday,
+      row.sunday,
+      row.restDay,
+      row.cashRegister,
+    ]),
+  ];
+  const pedidosRows = [
+    [tables.title],
+    ["PEDIDOS", "DE LUNES A DOMINGO", "DESCANSO"],
+    ...tables.pedidos.map((row) => [row.employeeName, row.mondayToSunday, row.restDay]),
+  ];
+  const domiciliosRows = [
+    [tables.title],
+    ["DOMICILIARIOS", "DE LUNES A DOMINGO", "DESCANSO"],
+    ...tables.domicilios.map((row) => [row.employeeName, row.mondayToSunday, row.restDay]),
+  ];
+  const summaryRows = [
+    [tables.title],
+    ["EMPLEADO", "AREA", "HORAS NORMALES", "HORAS EXTRA", "HORAS EXTRA MANUALES", "PERMISOS", "ADVERTENCIAS"],
+    ...tables.summary.map((row) => [
+      row.employeeName,
+      row.area,
+      row.normalHours,
+      row.overtimeHours,
+      row.manualOvertimeHours,
+      row.permits,
+      row.warnings,
+    ]),
+  ];
+
+  appendStyledSheet(XLSX, workbook, "Caja", cashierRows, [28, 34, 24, 24, 16, 20], "C6E7D2");
+  appendStyledSheet(XLSX, workbook, "Pedidos", pedidosRows, [24, 42, 16], "D8EAFE");
+  appendStyledSheet(XLSX, workbook, "Domicilios", domiciliosRows, [24, 42, 16], "FFEDD5");
+  appendStyledSheet(XLSX, workbook, "Resumen semanal", summaryRows, [28, 18, 18, 18, 22, 14, 34], "E7E5E4");
+
+  XLSX.writeFile(workbook, `turnos-fruver-${tables.weekStart}.xlsx`, { compression: true });
+}
+
 export function generateWhatsAppMessage({
   dateKey,
   schedule,
@@ -811,6 +907,188 @@ export function formatHours(value: number) {
 export function validateTimeRange(start: string, end: string) {
   return parseTime(end) > parseTime(start);
 }
+
+function buildCashierExcelRow(
+  employee: Employee,
+  weekDates: string[],
+  assignmentsByEmployee: Map<string, ScheduleAssignment[]>,
+  shiftTemplates: ShiftTemplate[],
+  allDayPermits: Map<string, EmployeeUnavailability>,
+): CashierExcelRow {
+  const assignments = assignmentsByEmployee.get(employee.id) ?? [];
+  const cashRegister = [...assignments].reverse().find((assignment) => assignment.cashRegister)?.cashRegister ?? "";
+
+  return {
+    employeeId: employee.id,
+    employeeName: employee.name.toUpperCase(),
+    mondayToFriday: summarizeDateRange(employee, weekDates.slice(0, 5), assignments, shiftTemplates, allDayPermits),
+    saturday: getEmployeeDayCell(employee, weekDates[5], assignments, shiftTemplates, allDayPermits),
+    sunday: getEmployeeDayCell(employee, weekDates[6], assignments, shiftTemplates, allDayPermits),
+    restDay: getDayLabel(employee.dayOff).toUpperCase(),
+    cashRegister: cashRegister.toUpperCase(),
+  };
+}
+
+function buildAreaExcelRow(
+  employee: Employee,
+  area: Area,
+  weekDates: string[],
+  assignmentsByEmployee: Map<string, ScheduleAssignment[]>,
+  shiftTemplates: ShiftTemplate[],
+  allDayPermits: Map<string, EmployeeUnavailability>,
+): AreaExcelRow {
+  const assignments = (assignmentsByEmployee.get(employee.id) ?? []).filter((assignment) => assignment.area === area);
+  return {
+    employeeId: employee.id,
+    employeeName: employee.name.toUpperCase(),
+    mondayToSunday: summarizeDateRange(employee, weekDates, assignments, shiftTemplates, allDayPermits),
+    restDay: getDayLabel(employee.dayOff).toUpperCase(),
+  };
+}
+
+function buildWeeklyExcelSummary(
+  employees: Employee[],
+  weekDates: string[],
+  assignmentsByEmployee: Map<string, ScheduleAssignment[]>,
+  unavailability: EmployeeUnavailability[],
+): WeeklyExcelSummaryRow[] {
+  const weekDateSet = new Set(weekDates);
+
+  return employees
+    .map((employee) => {
+      const assignments = assignmentsByEmployee.get(employee.id) ?? [];
+      return {
+        employeeId: employee.id,
+        employeeName: employee.name.toUpperCase(),
+        area: employee.primaryArea,
+        normalHours: roundHours(assignments.reduce((sum, assignment) => sum + (assignment.normalHours ?? 0), 0)),
+        overtimeHours: roundHours(assignments.reduce((sum, assignment) => sum + (assignment.overtimeHours ?? 0), 0)),
+        manualOvertimeHours: roundHours(
+          assignments.reduce((sum, assignment) => sum + (assignment.overtimeManual ? assignment.overtimeHours ?? 0 : 0), 0),
+        ),
+        permits: unavailability.filter((item) => item.employeeId === employee.id && weekDateSet.has(item.date)).length,
+        warnings: assignments
+          .map((assignment) => assignment.warningMessage)
+          .filter(Boolean)
+          .join(" | "),
+      };
+    })
+    .filter((row) => row.normalHours > 0 || row.overtimeHours > 0 || row.permits > 0)
+    .sort((a, b) => a.area.localeCompare(b.area) || a.employeeName.localeCompare(b.employeeName));
+}
+
+function getWeeklyAssignmentsByEmployee(weekDates: string[], schedules: DailySchedule[]) {
+  const weekDateSet = new Set(weekDates);
+  const assignmentsByEmployee = new Map<string, ScheduleAssignment[]>();
+
+  schedules
+    .filter((schedule) => weekDateSet.has(schedule.date))
+    .flatMap((schedule) => schedule.assignments)
+    .forEach((assignment) => {
+      assignmentsByEmployee.set(assignment.employeeId, [...(assignmentsByEmployee.get(assignment.employeeId) ?? []), assignment]);
+    });
+
+  assignmentsByEmployee.forEach((assignments) => assignments.sort((a, b) => a.date.localeCompare(b.date)));
+  return assignmentsByEmployee;
+}
+
+function getAllDayPermitsByEmployeeDate(weekDates: string[], unavailability: EmployeeUnavailability[]) {
+  const weekDateSet = new Set(weekDates);
+  const permits = new Map<string, EmployeeUnavailability>();
+  unavailability
+    .filter((item) => weekDateSet.has(item.date) && item.allDay)
+    .forEach((item) => permits.set(`${item.employeeId}-${item.date}`, item));
+  return permits;
+}
+
+function getEmployeesForArea(
+  area: Area,
+  employees: Employee[],
+  assignmentsByEmployee: Map<string, ScheduleAssignment[]>,
+) {
+  return employees
+    .filter(
+      (employee) =>
+        employee.primaryArea === area ||
+        employee.secondaryAreas.includes(area) ||
+        (assignmentsByEmployee.get(employee.id) ?? []).some((assignment) => assignment.area === area),
+    )
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function summarizeDateRange(
+  employee: Employee,
+  dates: string[],
+  assignments: ScheduleAssignment[],
+  shiftTemplates: ShiftTemplate[],
+  allDayPermits: Map<string, EmployeeUnavailability>,
+) {
+  const cells = dates.map((dateKey) => ({
+    label: getDayLabel(getDayKey(parseDateKey(dateKey))).slice(0, 3).toUpperCase(),
+    value: getEmployeeDayCell(employee, dateKey, assignments, shiftTemplates, allDayPermits),
+  }));
+  const meaningful = cells.filter((cell) => cell.value !== "-");
+  const unique = Array.from(new Set(meaningful.map((cell) => cell.value)));
+
+  if (!meaningful.length) return "-";
+  if (unique.length === 1) return unique[0];
+  return meaningful.map((cell) => `${cell.label}: ${cell.value}`).join(" | ");
+}
+
+function getEmployeeDayCell(
+  employee: Employee,
+  dateKey: string | undefined,
+  assignments: ScheduleAssignment[],
+  shiftTemplates: ShiftTemplate[],
+  allDayPermits: Map<string, EmployeeUnavailability>,
+) {
+  if (!dateKey) return "-";
+  if (allDayPermits.has(`${employee.id}-${dateKey}`)) return "PERMISO";
+
+  const dayKey = getDayKey(parseDateKey(dateKey));
+  const assignment = assignments.find((item) => item.date === dateKey);
+  if (!assignment) return employee.dayOff === dayKey ? "DESCANSO" : "-";
+
+  const template = shiftTemplates.find((item) => item.id === assignment.shiftTemplateId);
+  return (assignment.customScheduleText ?? template?.scheduleText ?? "SIN HORARIO").toUpperCase();
+}
+
+function appendStyledSheet(
+  XLSX: typeof import("xlsx"),
+  workbook: import("xlsx").WorkBook,
+  name: string,
+  rows: (string | number)[][],
+  widths: number[],
+  headerColor: string,
+) {
+  const worksheet = XLSX.utils.aoa_to_sheet(rows);
+  const columnCount = Math.max(...rows.map((row) => row.length));
+  worksheet["!cols"] = widths.map((wch) => ({ wch }));
+  worksheet["!merges"] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: columnCount - 1 } }];
+
+  rows.forEach((row, rowIndex) => {
+    row.forEach((_, columnIndex) => {
+      const cellRef = XLSX.utils.encode_cell({ r: rowIndex, c: columnIndex });
+      const cell = worksheet[cellRef] as Record<string, unknown> | undefined;
+      if (!cell) return;
+      cell.s = {
+        alignment: { horizontal: "center", vertical: "center", wrapText: true },
+        border: excelBorder,
+        font: { bold: rowIndex <= 1 || columnIndex === 0, sz: rowIndex === 0 ? 16 : 11 },
+        fill: rowIndex === 0 || rowIndex === 1 ? { fgColor: { rgb: headerColor } } : undefined,
+      };
+    });
+  });
+
+  XLSX.utils.book_append_sheet(workbook, worksheet, name);
+}
+
+const excelBorder = {
+  top: { style: "thin", color: { rgb: "A8A29E" } },
+  right: { style: "thin", color: { rgb: "A8A29E" } },
+  bottom: { style: "thin", color: { rgb: "A8A29E" } },
+  left: { style: "thin", color: { rgb: "A8A29E" } },
+};
 
 function getDesiredCashRegisterCount(profile: DayProfile, settings: PaymentSettings) {
   if (profile.isStrongSalesDay) return settings.strongDayCashRegisters;
