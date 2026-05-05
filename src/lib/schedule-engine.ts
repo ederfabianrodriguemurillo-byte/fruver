@@ -5,6 +5,7 @@ import type {
   Area,
   AssignmentMetrics,
   CashierExcelRow,
+  ContractType,
   DailyReportRow,
   DailySchedule,
   DayKey,
@@ -19,6 +20,7 @@ import type {
   ScheduleAssignment,
   ShiftTemplate,
   WeeklyExcelSummaryRow,
+  WeeklyAvailability,
 } from "./types";
 
 const dayKeys: DayKey[] = [
@@ -31,6 +33,16 @@ const dayKeys: DayKey[] = [
   "sabado",
 ];
 
+const workWeekDayKeys: DayKey[] = [
+  "lunes",
+  "martes",
+  "miercoles",
+  "jueves",
+  "viernes",
+  "sabado",
+  "domingo",
+];
+
 const dayLabels: Record<DayKey, string> = {
   lunes: "lunes",
   martes: "martes",
@@ -40,6 +52,24 @@ const dayLabels: Record<DayKey, string> = {
   sabado: "sabado",
   domingo: "domingo",
 };
+
+export const defaultAvailableDays: WeeklyAvailability = {
+  lunes: true,
+  martes: true,
+  miercoles: true,
+  jueves: true,
+  viernes: true,
+  sabado: true,
+  domingo: true,
+};
+
+export const contractTypeOptions: ContractType[] = [
+  "Tiempo completo",
+  "Medio tiempo",
+  "Por turnos",
+  "Solo fines de semana",
+  "Dias especificos",
+];
 
 const monthLabels = [
   "Enero",
@@ -83,6 +113,21 @@ export function getDayKey(date: Date): DayKey {
 
 export function getDayLabel(dayKey: DayKey) {
   return dayLabels[dayKey];
+}
+
+export function getEmployeeAvailableDays(employee: Pick<Employee, "availableDays">) {
+  return { ...defaultAvailableDays, ...(employee.availableDays ?? {}) };
+}
+
+export function isEmployeeAvailableOnDay(employee: Pick<Employee, "availableDays">, dayKey: DayKey) {
+  return getEmployeeAvailableDays(employee)[dayKey] !== false;
+}
+
+export function getAvailableDayLabels(employee: Pick<Employee, "availableDays">) {
+  const availableDays = getEmployeeAvailableDays(employee);
+  return workWeekDayKeys
+    .filter((dayKey) => availableDays[dayKey])
+    .map((dayKey) => getDayLabel(dayKey));
 }
 
 export function formatLongDate(dateKey: string) {
@@ -441,8 +486,9 @@ export function scoreEmployeeForShift(
   },
 ) {
   if (!employee.active) return 10000;
-  if (employee.dayOff === context.dayKey) return 9500;
   if (hasAllDayUnavailability(employee.id, dateKey, context.unavailability)) return 9000;
+  if (employee.dayOff === context.dayKey) return 9500;
+  if (!isEmployeeAvailableOnDay(employee, context.dayKey)) return 9200;
 
   const allAssignmentsBefore = context.schedules
     .filter((schedule) => schedule.date < dateKey)
@@ -1047,7 +1093,10 @@ function getEmployeeDayCell(
 
   const dayKey = getDayKey(parseDateKey(dateKey));
   const assignment = assignments.find((item) => item.date === dateKey);
-  if (!assignment) return employee.dayOff === dayKey ? "DESCANSO" : "-";
+  if (!assignment) {
+    if (!isEmployeeAvailableOnDay(employee, dayKey)) return "-";
+    return employee.dayOff === dayKey ? "DESCANSO" : "-";
+  }
 
   const template = shiftTemplates.find((item) => item.id === assignment.shiftTemplateId);
   return (assignment.customScheduleText ?? template?.scheduleText ?? "SIN HORARIO").toUpperCase();

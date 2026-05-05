@@ -41,6 +41,8 @@ import {
   calculateDailyReport,
   calculateShiftHours,
   calculateWeeklyReport,
+  contractTypeOptions,
+  defaultAvailableDays,
   duplicateWeek,
   formatCurrency,
   formatDateKey,
@@ -53,15 +55,18 @@ import {
   generateSmartSchedule,
   generateWhatsAppMessage,
   getAssignmentTimes,
+  getAvailableDayLabels,
   getDayKindLabel,
   getDayKey,
   getDayLabel,
   getDayProfile,
+  getEmployeeAvailableDays,
   getScheduleWarnings,
   getTodayKey,
   getTomorrowKey,
   getWeekDates,
   hydrateAssignmentMetrics,
+  isEmployeeAvailableOnDay,
   makeId,
   parseDateKey,
   replaceSchedules,
@@ -77,6 +82,7 @@ import type {
   Area,
   CashRegister,
   CashierExcelRow,
+  ContractType,
   DailyReportRow,
   DailySchedule,
   DayKey,
@@ -170,6 +176,8 @@ const emptyEmployee = (): Employee => ({
   primaryArea: "Caja",
   secondaryAreas: [],
   type: "Fijo",
+  contractType: "Tiempo completo",
+  availableDays: defaultAvailableDays,
   dayOff: "lunes",
   note: "",
   phone: "",
@@ -587,10 +595,20 @@ export function FruverScheduler() {
     const nextEmployee: Employee = {
       ...employeeDraft,
       name: employeeDraft.name.trim(),
+      contractType: employeeDraft.contractType ?? "Tiempo completo",
+      availableDays: getEmployeeAvailableDays(employeeDraft),
       note: employeeDraft.note?.trim(),
       phone: employeeDraft.phone?.trim(),
       baseShiftTemplateId: employeeDraft.preferredShiftTemplateId || undefined,
     };
+    if (!Object.values(nextEmployee.availableDays ?? {}).some(Boolean)) {
+      showNotice("warning", "Selecciona al menos un dia disponible");
+      return;
+    }
+    if (!isEmployeeAvailableOnDay(nextEmployee, nextEmployee.dayOff)) {
+      nextEmployee.dayOff =
+        dayOptions.find((day) => nextEmployee.availableDays?.[day.value])?.value ?? nextEmployee.dayOff;
+    }
 
     setState((current) => {
       const exists = current.employees.some((employee) => employee.id === nextEmployee.id);
@@ -658,15 +676,28 @@ export function FruverScheduler() {
     const dayKey = getDayKey(parseDateKey(selectedDate));
     const hasDayOff = employee?.dayOff === dayKey;
     const hasPermit = state.unavailability.some((item) => item.employeeId === assignmentDraft.employeeId && item.date === selectedDate && item.allDay);
+    const isUnavailableByContract = employee ? !isEmployeeAvailableOnDay(employee, dayKey) : false;
+    const canWorkSelectedArea =
+      employee?.primaryArea === assignmentDraft.area || employee?.secondaryAreas.includes(assignmentDraft.area);
 
     if (selectedSchedule?.assignments.some((assignment) => assignment.employeeId === assignmentDraft.employeeId)) {
       showNotice("warning", "Ese empleado ya esta asignado ese dia");
+      return;
+    }
+    if (!canWorkSelectedArea) {
+      showNotice("warning", "Ese empleado no tiene esta area como principal ni secundaria");
       return;
     }
     if (hasPermit && !window.confirm("Este empleado tiene permiso todo el dia. Deseas asignarlo de todas formas?")) {
       return;
     }
     if (hasDayOff && !window.confirm("Este empleado esta en dia de descanso. Deseas asignarlo de todas formas?")) {
+      return;
+    }
+    if (
+      isUnavailableByContract &&
+      !window.confirm("Advertencia: este empleado no esta contratado/disponible para trabajar este dia. Deseas asignarlo de todas formas?")
+    ) {
       return;
     }
 
@@ -1305,6 +1336,16 @@ function EmployeesSection({
   resetDraft: () => void;
   setState: Dispatch<SetStateAction<AppState>>;
 }) {
+  const draftAvailableDays = getEmployeeAvailableDays(employeeDraft);
+  const availableDayOptions = dayOptions.filter((day) => draftAvailableDays[day.value]);
+  const updateAvailableDay = (day: DayKey, available: boolean) => {
+    const nextAvailableDays = { ...draftAvailableDays, [day]: available };
+    const nextDayOff = nextAvailableDays[employeeDraft.dayOff]
+      ? employeeDraft.dayOff
+      : dayOptions.find((option) => nextAvailableDays[option.value])?.value ?? employeeDraft.dayOff;
+    setEmployeeDraft({ ...employeeDraft, availableDays: nextAvailableDays, dayOff: nextDayOff });
+  };
+
   return (
     <div className="grid gap-4 xl:grid-cols-[0.75fr_1.25fr]">
       <section className={panelClass}>
@@ -1331,13 +1372,40 @@ function EmployeesSection({
               </select>
             </Field>
           </div>
+          <Field label="Tipo de contratacion">
+            <select className={inputClass} value={employeeDraft.contractType ?? "Tiempo completo"} onChange={(event) => {
+              const contractType = event.target.value as ContractType;
+              const availableDays = getAvailabilityForContractType(contractType, draftAvailableDays);
+              const dayOff = availableDays[employeeDraft.dayOff]
+                ? employeeDraft.dayOff
+                : dayOptions.find((day) => availableDays[day.value])?.value ?? employeeDraft.dayOff;
+              setEmployeeDraft({ ...employeeDraft, contractType, availableDays, dayOff });
+            }}>
+              {contractTypeOptions.map((type) => <option key={type}>{type}</option>)}
+            </select>
+          </Field>
+          <Field label="Dias disponibles para trabajar">
+            <div className="flex flex-wrap gap-2">
+              {dayOptions.map((day) => (
+                <label key={day.value} className={draftAvailableDays[day.value] ? segmentedActiveButton : segmentedButton}>
+                  <input
+                    className="sr-only"
+                    type="checkbox"
+                    checked={draftAvailableDays[day.value]}
+                    onChange={(event) => updateAvailableDay(day.value, event.target.checked)}
+                  />
+                  {day.label}
+                </label>
+              ))}
+            </div>
+          </Field>
           <Field label="Areas secundarias">
             <CheckboxRow options={areas.filter((area) => area !== employeeDraft.primaryArea)} values={employeeDraft.secondaryAreas} onChange={(values) => setEmployeeDraft({ ...employeeDraft, secondaryAreas: values })} />
           </Field>
           <div className="grid gap-3 sm:grid-cols-2">
             <Field label="Dia de descanso">
               <select className={inputClass} value={employeeDraft.dayOff} onChange={(event) => setEmployeeDraft({ ...employeeDraft, dayOff: event.target.value as DayKey })}>
-                {dayOptions.map((day) => <option key={day.value} value={day.value}>{day.label}</option>)}
+                {(availableDayOptions.length ? availableDayOptions : dayOptions).map((day) => <option key={day.value} value={day.value}>{day.label}</option>)}
               </select>
             </Field>
             <Field label="Preferencia de turno opcional">
@@ -1379,7 +1447,8 @@ function EmployeesSection({
               <div className="flex items-start justify-between gap-3">
                 <div>
                   <p className="font-semibold">{employee.name}</p>
-                  <p className="text-sm text-stone-500">{employee.primaryArea} · {employee.type} · descanso {getDayLabel(employee.dayOff)}</p>
+                  <p className="text-sm text-stone-500">{employee.primaryArea} · {employee.type} · {employee.contractType ?? "Tiempo completo"} · descanso {getDayLabel(employee.dayOff)}</p>
+                  <p className="text-sm text-stone-500">Disponible: {getAvailableDayLabels(employee).join(", ") || "Sin dias"}</p>
                   {employee.phone ? <p className="text-sm text-stone-500">{employee.phone}</p> : null}
                 </div>
                 <div className="flex gap-2">
@@ -1389,6 +1458,7 @@ function EmployeesSection({
               </div>
               <div className="mt-3 flex flex-wrap gap-2">
                 <span className={employee.active ? tagClass : tagMutedClass}>{employee.active ? "Activo" : "Inactivo"}</span>
+                <span className={tagMutedClass}>{employee.contractType ?? "Tiempo completo"}</span>
                 {employee.secondaryAreas.map((area) => <span className={tagMutedClass} key={area}>{area}</span>)}
               </div>
             </div>
@@ -2127,7 +2197,12 @@ function getOrCreateSchedule(dateKey: string, state: AppState): DailySchedule {
 
 function normalizeState(value: Partial<AppState>): AppState {
   return {
-    employees: (value.employees?.length ? value.employees : employeesSeed).map((employee) => ({ ...employee, preferredShiftTemplateId: employee.preferredShiftTemplateId ?? employee.baseShiftTemplateId })),
+    employees: (value.employees?.length ? value.employees : employeesSeed).map((employee) => ({
+      ...employee,
+      contractType: employee.contractType ?? "Tiempo completo",
+      availableDays: getEmployeeAvailableDays(employee),
+      preferredShiftTemplateId: employee.preferredShiftTemplateId ?? employee.baseShiftTemplateId,
+    })),
     shiftTemplates: value.shiftTemplates?.length ? value.shiftTemplates : shiftTemplatesSeed,
     schedules: value.schedules ?? [],
     holidays: value.holidays?.length ? value.holidays : holidaySeed,
@@ -2140,6 +2215,24 @@ function shouldUploadLocalState(localState: AppState, remoteState: AppState) {
   const remoteHasWorkData = remoteState.schedules.length > 0 || remoteState.unavailability.length > 0;
   const localHasWorkData = localState.schedules.length > 0 || localState.unavailability.length > 0;
   return localHasWorkData && !remoteHasWorkData;
+}
+
+function getAvailabilityForContractType(contractType: ContractType, currentAvailability = defaultAvailableDays) {
+  if (contractType === "Solo fines de semana") {
+    return {
+      lunes: false,
+      martes: false,
+      miercoles: false,
+      jueves: false,
+      viernes: false,
+      sabado: true,
+      domingo: true,
+    };
+  }
+  if (contractType === "Tiempo completo" || contractType === "Medio tiempo") {
+    return defaultAvailableDays;
+  }
+  return currentAvailability;
 }
 
 function upsertById<T extends { id: string }>(items: T[], item: T) {
@@ -2211,7 +2304,7 @@ function toOptionalNumber(value: string) {
 }
 
 type DbShiftTemplate = { id: string; name: string; schedule_text: string; start1: string; end1: string; start2: string | null; end2: string | null; total_hours: number; applies_to: DayKind[]; allowed_areas: Area[]; active: boolean };
-type DbEmployee = { id: string; name: string; primary_area: Area; secondary_areas: Area[]; employee_type: EmployeeType; day_off: DayKey; base_shift_template_id: string | null; preferred_shift_template_id?: string | null; note: string | null; phone?: string | null; active: boolean; normal_hourly_rate: number | null; overtime_hourly_rate: number | null };
+type DbEmployee = { id: string; name: string; primary_area: Area; secondary_areas: Area[]; employee_type: EmployeeType; contract_type?: ContractType | null; available_days?: Partial<Record<DayKey, boolean>> | null; day_off: DayKey; base_shift_template_id: string | null; preferred_shift_template_id?: string | null; note: string | null; phone?: string | null; active: boolean; normal_hourly_rate: number | null; overtime_hourly_rate: number | null };
 type DbHoliday = { id: string; holiday_date: string; name: string; active: boolean };
 type DbSchedule = { id: string; schedule_date: string; week_start: string; day_kind: DayKind; is_strong_sales_day: boolean; generated_at: string };
 type DbScheduleAssignment = { id: string; schedule_id: string; assignment_date: string; employee_id: string; area: Area; shift_template_id: string; cash_register: CashRegister | null; note: string | null; manual: boolean; custom_start1: string | null; custom_end1: string | null; custom_start2: string | null; custom_end2: string | null; custom_total_hours: number | null; custom_schedule_text: string | null; normal_hours?: number | null; overtime_hours?: number | null; overtime_manual?: boolean | null; overtime_reason?: string | null; break_minutes?: number | null; warning_message?: string | null };
@@ -2222,7 +2315,7 @@ function dbTemplateToApp(row: DbShiftTemplate): ShiftTemplate {
   return { id: row.id, name: row.name, scheduleText: row.schedule_text, start1: row.start1.slice(0, 5), end1: row.end1.slice(0, 5), start2: row.start2?.slice(0, 5), end2: row.end2?.slice(0, 5), totalHours: Number(row.total_hours), appliesTo: row.applies_to ?? [], allowedAreas: row.allowed_areas ?? [], active: row.active };
 }
 function dbEmployeeToApp(row: DbEmployee): Employee {
-  return { id: row.id, name: row.name, primaryArea: row.primary_area, secondaryAreas: row.secondary_areas ?? [], type: row.employee_type, dayOff: row.day_off, baseShiftTemplateId: row.base_shift_template_id ?? undefined, preferredShiftTemplateId: row.preferred_shift_template_id ?? row.base_shift_template_id ?? undefined, note: row.note ?? "", phone: row.phone ?? "", active: row.active, normalHourlyRate: row.normal_hourly_rate ?? undefined, overtimeHourlyRate: row.overtime_hourly_rate ?? undefined };
+  return { id: row.id, name: row.name, primaryArea: row.primary_area, secondaryAreas: row.secondary_areas ?? [], type: row.employee_type, contractType: row.contract_type ?? "Tiempo completo", availableDays: { ...defaultAvailableDays, ...(row.available_days ?? {}) }, dayOff: row.day_off, baseShiftTemplateId: row.base_shift_template_id ?? undefined, preferredShiftTemplateId: row.preferred_shift_template_id ?? row.base_shift_template_id ?? undefined, note: row.note ?? "", phone: row.phone ?? "", active: row.active, normalHourlyRate: row.normal_hourly_rate ?? undefined, overtimeHourlyRate: row.overtime_hourly_rate ?? undefined };
 }
 function dbHolidayToApp(row: DbHoliday): Holiday {
   return { id: row.id, date: row.holiday_date, name: row.name, active: row.active };
@@ -2237,7 +2330,7 @@ function dbUnavailableToApp(row: DbUnavailability): EmployeeUnavailability {
   return { id: row.id, employeeId: row.employee_id, date: row.date, type: row.type, reason: row.reason ?? "", allDay: row.all_day, startTime: row.start_time?.slice(0, 5), endTime: row.end_time?.slice(0, 5) };
 }
 function appTemplateToDb(template: ShiftTemplate) { return { id: template.id, name: template.name, schedule_text: template.scheduleText, start1: template.start1, end1: template.end1, start2: template.start2 ?? null, end2: template.end2 ?? null, total_hours: template.totalHours, applies_to: template.appliesTo, allowed_areas: template.allowedAreas, active: template.active }; }
-function appEmployeeToDb(employee: Employee) { return { id: employee.id, name: employee.name, primary_area: employee.primaryArea, secondary_areas: employee.secondaryAreas, employee_type: employee.type, day_off: employee.dayOff, base_shift_template_id: employee.preferredShiftTemplateId ?? employee.baseShiftTemplateId ?? null, preferred_shift_template_id: employee.preferredShiftTemplateId ?? null, note: employee.note ?? null, phone: employee.phone ?? null, active: employee.active, normal_hourly_rate: employee.normalHourlyRate ?? null, overtime_hourly_rate: employee.overtimeHourlyRate ?? null }; }
+function appEmployeeToDb(employee: Employee) { return { id: employee.id, name: employee.name, primary_area: employee.primaryArea, secondary_areas: employee.secondaryAreas, employee_type: employee.type, contract_type: employee.contractType ?? "Tiempo completo", available_days: getEmployeeAvailableDays(employee), day_off: employee.dayOff, base_shift_template_id: employee.preferredShiftTemplateId ?? employee.baseShiftTemplateId ?? null, preferred_shift_template_id: employee.preferredShiftTemplateId ?? null, note: employee.note ?? null, phone: employee.phone ?? null, active: employee.active, normal_hourly_rate: employee.normalHourlyRate ?? null, overtime_hourly_rate: employee.overtimeHourlyRate ?? null }; }
 function appHolidayToDb(holiday: Holiday) { return { id: holiday.id, holiday_date: holiday.date, name: holiday.name, active: holiday.active }; }
 function appScheduleToDb(schedule: DailySchedule) { return { id: schedule.id, schedule_date: schedule.date, week_start: schedule.weekStart, day_kind: schedule.dayKind, is_strong_sales_day: schedule.isStrongSalesDay, generated_at: schedule.generatedAt }; }
 function appAssignmentToDb(assignment: ScheduleAssignment) { return { id: assignment.id, schedule_id: assignment.scheduleId, assignment_date: assignment.date, employee_id: assignment.employeeId, area: assignment.area, shift_template_id: assignment.shiftTemplateId, cash_register: assignment.cashRegister ?? null, note: assignment.note ?? null, manual: assignment.manual, custom_start1: assignment.customStart1 ?? null, custom_end1: assignment.customEnd1 ?? null, custom_start2: assignment.customStart2 ?? null, custom_end2: assignment.customEnd2 ?? null, custom_total_hours: assignment.customTotalHours ?? null, custom_schedule_text: assignment.customScheduleText ?? null, normal_hours: assignment.normalHours ?? null, overtime_hours: assignment.overtimeHours ?? null, overtime_manual: assignment.overtimeManual ?? null, overtime_reason: assignment.overtimeReason ?? null, break_minutes: assignment.breakMinutes ?? null, warning_message: assignment.warningMessage ?? null }; }

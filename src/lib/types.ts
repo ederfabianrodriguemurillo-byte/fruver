@@ -2,6 +2,13 @@ export type Area = "Caja" | "Pedidos" | "Domicilios" | "Surtidores" | "Hornos";
 
 export type EmployeeType = "Fijo" | "Rotativo" | "Apoyo";
 
+export type ContractType =
+  | "Tiempo completo"
+  | "Medio tiempo"
+  | "Por turnos"
+  | "Solo fines de semana"
+  | "Dias especificos";
+
 export type DayKey =
   | "lunes"
   | "martes"
@@ -12,6 +19,8 @@ export type DayKey =
   | "domingo";
 
 export type DayKind = "normal" | "sabado" | "domingo" | "festivo" | "fuerte";
+
+export type WeeklyAvailability = Record<DayKey, boolean>;
 
 export type CashRegister =
   | "caja musica"
@@ -33,6 +42,8 @@ export interface Employee {
   primaryArea: Area;
   secondaryAreas: Area[];
   type: EmployeeType;
+  contractType?: ContractType;
+  availableDays?: WeeklyAvailability;
   dayOff: DayKey;
   baseShiftTemplateId?: string;
   preferredShiftTemplateId?: string;
